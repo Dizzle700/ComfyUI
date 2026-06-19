@@ -50,10 +50,10 @@ done
 COMFY_REPO="https://github.com/Comfy-Org/ComfyUI.git"
 MANAGER_DIR="$COMFY_DIR/custom_nodes/comfyui-manager"
 MANAGER_REPO="https://github.com/Comfy-Org/ComfyUI-Manager.git"
-TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu124}"
-TORCH_VERSION="${TORCH_VERSION:-2.6.0}"
-TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.21.0}"
-TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.6.0}"
+TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
+TORCH_VERSION="${TORCH_VERSION:-2.8.0}"
+TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.23.0}"
+TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.8.0}"
 
 info() { printf '%b\n' "${BLUE}$*${NC}"; }
 success() { printf '%b\n' "${GREEN}$*${NC}"; }
@@ -96,7 +96,7 @@ EOF
 }
 
 install_compatible_torch() {
-    warn "Устанавливаем PyTorch $TORCH_VERSION для CUDA 12.4 wheels ($TORCH_INDEX_URL)..."
+    warn "Устанавливаем PyTorch $TORCH_VERSION для CUDA 13.0 wheels ($TORCH_INDEX_URL)..."
     uv pip install --python "$VENV_PYTHON" \
         --force-reinstall \
         torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" torchaudio=="$TORCHAUDIO_VERSION" \
