@@ -153,7 +153,7 @@ uv pip install --python "$VENV_PYTHON" \
 info "Устанавливаем/обновляем ComfyUI-Manager..."
 mkdir -p "$COMFY_DIR/custom_nodes"
 if [[ ! -d "$MANAGER_DIR" ]]; then
-    git clone "$MANAGER_REPO" "$MANAGER_DIR"
+    git clone --depth 1 "$MANAGER_REPO" "$MANAGER_DIR"
 else
     git -C "$MANAGER_DIR" pull --ff-only
 fi

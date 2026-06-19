@@ -11,6 +11,7 @@ import tempfile
 import zipfile
 import queue
 import shlex
+from collections import deque
 import gradio as gr
 import psutil
 
@@ -27,19 +28,28 @@ FILE_DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "comfy-control-downloads
 comfy_process = None
 process_lock = threading.Lock()
 
+# Состояние установки
+is_installing = False
+install_lock = threading.Lock()
+
 # Лог скачивания моделей
-download_logs = []
+download_logs = deque(maxlen=1000)
 download_lock = threading.Lock()
 
 def add_download_log(text):
     with download_lock:
         download_logs.append(text)
-        if len(download_logs) > 1000:
-            download_logs.pop(0)
 
 def get_download_logs():
     with download_lock:
         return "\n".join(download_logs)
+
+# Helper: построить команду uv pip install с учётом venv/system
+def build_uv_pip_cmd(*args):
+    venv_python = os.path.join(COMFY_DIR, ".venv", "bin", "python")
+    if os.path.exists(venv_python):
+        return ["uv", "pip", "install", "--python", venv_python, *args]
+    return ["uv", "pip", "install", "--system", *args]
 
 def get_system_stats():
     # Загрузка CPU и RAM
@@ -143,6 +153,9 @@ def start_comfy(args):
                 preexec_fn=os.setsid # Создаем группу процессов для надежного завершения
             )
         
+        # Popen дублирует fd; родительский дескриптор больше не нужен
+        log_file_obj.close()
+        
         time.sleep(2) # Даем процессу инициализироваться
         return f"Запущено! Логи пишутся в {LOG_FILE}"
     except Exception as e:
@@ -180,11 +193,12 @@ def stop_comfy():
     except Exception as e:
         # Force kill
         try:
-            if comfy_process is not None:
-                os.killpg(os.getpgid(comfy_process.pid), signal.SIGKILL)
-                comfy_process = None
-                return "Процесс принудительно убит (SIGKILL)."
-        except:
+            with process_lock:
+                if comfy_process is not None:
+                    os.killpg(os.getpgid(comfy_process.pid), signal.SIGKILL)
+                    comfy_process = None
+                    return "Процесс принудительно убит (SIGKILL)."
+        except Exception:
             pass
         return f"Ошибка при остановке: {str(e)}"
 
@@ -194,8 +208,7 @@ def restart_comfy(args):
     start_result = start_comfy(args)
     return f"{stop_result}\n{start_result}"
 
-is_installing = False
-install_lock = threading.Lock()
+# is_installing и install_lock определены выше, в блоке глобальных переменных
 
 def run_installation():
     global is_installing
@@ -233,7 +246,7 @@ def run_installation():
             try:
                 with open(LOG_FILE, "a", encoding="utf-8") as f:
                     f.write(f"\nОшибка при установке: {str(e)}\n")
-            except:
+            except Exception:
                 pass
         finally:
             with install_lock:
@@ -246,23 +259,22 @@ def read_logs(num_lines=50):
     if not os.path.exists(LOG_FILE):
         return "Файл логов пуст или ещё не создан."
     
+    n = max(1, int(num_lines))
     try:
+        # Читаем только последние N строк через deque вместо загрузки всего файла
         with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-            tail = lines[-int(num_lines):]
+            tail = deque(f, maxlen=n)
             return "".join(tail)
     except Exception as e:
         return f"Не удалось прочитать логи: {str(e)}"
 
 # Установка кастомных нод
-node_logs = []
+node_logs = deque(maxlen=100)
 node_lock = threading.Lock()
 
 def add_node_log(text):
     with node_lock:
         node_logs.append(text)
-        if len(node_logs) > 100:
-            node_logs.pop(0)
 
 def get_node_logs():
     with node_lock:
@@ -317,11 +329,7 @@ def install_custom_node(repo_url):
         req_file = os.path.join(target_node_dir, "requirements.txt")
         if os.path.exists(req_file):
             add_node_log(f"Обнаружен requirements.txt. Устанавливаем зависимости...")
-            venv_python = os.path.join(COMFY_DIR, ".venv", "bin", "python")
-            if os.path.exists(venv_python):
-                cmd = ["uv", "pip", "install", "--python", venv_python, "-r", req_file]
-            else:
-                cmd = ["uv", "pip", "install", "--system", "-r", req_file]
+            cmd = build_uv_pip_cmd("-r", req_file)
                 
             proc_req = subprocess.Popen(
                 cmd,
@@ -425,17 +433,12 @@ def install_sparkvsr():
         copy_sparkvsr_workflow(source_workflow)
 
         # 3. Установка Python зависимостей
-        venv_python = os.path.join(COMFY_DIR, ".venv", "bin", "python")
-        is_venv = os.path.exists(venv_python)
         
         # Зависимости для ComfyUI-Spark
         spark_req = os.path.join(spark_plugin_symlink, "requirements.txt")
         if os.path.exists(spark_req):
             add_node_log("Устанавливаем зависимости для ComfyUI-Spark...")
-            if is_venv:
-                cmd = ["uv", "pip", "install", "--python", venv_python, "-r", spark_req]
-            else:
-                cmd = ["uv", "pip", "install", "--system", "-r", spark_req]
+            cmd = build_uv_pip_cmd("-r", spark_req)
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             while True:
                 line = proc.stdout.readline()
@@ -447,10 +450,7 @@ def install_sparkvsr():
         vhs_req = os.path.join(vhs_dir, "requirements.txt")
         if os.path.exists(vhs_req):
             add_node_log("Устанавливаем зависимости для VideoHelperSuite...")
-            if is_venv:
-                cmd = ["uv", "pip", "install", "--python", venv_python, "-r", vhs_req]
-            else:
-                cmd = ["uv", "pip", "install", "--system", "-r", vhs_req]
+            cmd = build_uv_pip_cmd("-r", vhs_req)
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             while True:
                 line = proc.stdout.readline()
@@ -460,17 +460,14 @@ def install_sparkvsr():
             
         # Дополнительные зависимости
         add_node_log("Устанавливаем дополнительные пакеты (peft, einops, fal-client)...")
-        if is_venv:
-            cmd_extra = [
-                "uv", "pip", "install", "--python", venv_python,
-                "peft>=0.9.0", "einops>=0.6.0", "fal-client", "requests",
-            ]
-        else:
-            cmd_extra = [
-                "uv", "pip", "install", "--system",
-                "peft>=0.9.0", "einops>=0.6.0", "fal-client", "requests",
-            ]
-        subprocess.run(cmd_extra, check=True)
+        cmd_extra = build_uv_pip_cmd("peft>=0.9.0", "einops>=0.6.0", "fal-client", "requests")
+        proc_extra = subprocess.Popen(cmd_extra, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        while True:
+            line = proc_extra.stdout.readline()
+            if not line: break
+            add_node_log(line.strip())
+        proc_extra.wait()
+        add_node_log(f"Установка дополнительных пакетов завершена с кодом {proc_extra.returncode}")
         
         # 4. Скачивание весов
         loras_dir = os.path.join(COMFY_DIR, "models", "loras")
@@ -1195,11 +1192,15 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                 lines=15
             )
 
-    # Таймер для автообновления статуса и ресурсов
+    # Автообновление статуса и ресурсов каждые 5 секунд
+    auto_refresh_timer = gr.Timer(value=5)
+
     def periodic_status_update():
         status, pid = get_comfy_status()
         stats = get_system_stats()
         return status, pid, stats
+
+    auto_refresh_timer.tick(periodic_status_update, outputs=[status_indicator, pid_indicator, system_stats_box])
 
     # Привязка логики к кнопкам Dashboard
     btn_start.click(start_comfy, inputs=[comfy_args], outputs=[status_indicator])
@@ -1347,4 +1348,6 @@ if __name__ == "__main__":
     # Запуск Gradio. Порт 7860 по умолчанию.
     # Флаг share=True не рекомендуется запускать без пароля на публичных подах,
     # но bind на 0.0.0.0 позволяет открыть веб-интерфейс через прокси-порт RunPod.
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    panel_pass = os.environ.get("PANEL_PASS", "")
+    auth = (os.environ.get("PANEL_USER", "admin"), panel_pass) if panel_pass else None
+    demo.launch(server_name="0.0.0.0", server_port=7860, auth=auth)
