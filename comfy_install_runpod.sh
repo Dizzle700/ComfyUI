@@ -19,11 +19,15 @@ export COMFY_DIR
 
 if [[ -d "/workspace" ]]; then
     export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/workspace/.cache}"
+    export UV_CACHE_DIR="${UV_CACHE_DIR:-/workspace/.cache/uv}"
+    export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/workspace/.cache/pip}"
+    export TORCH_HOME="${TORCH_HOME:-/workspace/.cache/torch}"
     export HF_HOME="${HF_HOME:-/workspace/.cache/huggingface}"
     export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-/workspace/.cache/huggingface/hub}"
     export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-/workspace/.cache/huggingface/transformers}"
     export DIFFUSERS_CACHE="${DIFFUSERS_CACHE:-/workspace/.cache/huggingface/diffusers}"
-    mkdir -p "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE" "$DIFFUSERS_CACHE"
+    mkdir -p "$UV_CACHE_DIR" "$PIP_CACHE_DIR" "$TORCH_HOME" \
+        "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE" "$DIFFUSERS_CACHE"
 fi
 
 START_PANEL=true
@@ -46,6 +50,10 @@ done
 COMFY_REPO="https://github.com/Comfy-Org/ComfyUI.git"
 MANAGER_DIR="$COMFY_DIR/custom_nodes/comfyui-manager"
 MANAGER_REPO="https://github.com/Comfy-Org/ComfyUI-Manager.git"
+TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu124}"
+TORCH_VERSION="${TORCH_VERSION:-2.6.0}"
+TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.21.0}"
+TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.6.0}"
 
 info() { printf '%b\n' "${BLUE}$*${NC}"; }
 success() { printf '%b\n' "${GREEN}$*${NC}"; }
@@ -76,6 +84,23 @@ ensure_uv() {
     info "uv не найден. Устанавливаем..."
     curl --proto '=https' --tlsv1.2 -LsSf https://astral.sh/uv/install.sh | sh
     export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+}
+
+write_torch_constraints() {
+    TORCH_CONSTRAINTS="$COMFY_DIR/.runpod-torch-constraints.txt"
+    cat > "$TORCH_CONSTRAINTS" <<EOF
+torch==$TORCH_VERSION
+torchvision==$TORCHVISION_VERSION
+torchaudio==$TORCHAUDIO_VERSION
+EOF
+}
+
+install_compatible_torch() {
+    warn "Устанавливаем PyTorch $TORCH_VERSION для CUDA 12.4 wheels ($TORCH_INDEX_URL)..."
+    uv pip install --python "$VENV_PYTHON" \
+        --force-reinstall \
+        torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" torchaudio=="$TORCHAUDIO_VERSION" \
+        --index-url "$TORCH_INDEX_URL"
 }
 
 # Клонируем или обновляем ComfyUI
@@ -111,18 +136,19 @@ else
     success "Используем существующее окружение: $COMFY_DIR/.venv"
 fi
 VENV_PYTHON="$COMFY_DIR/.venv/bin/python"
+write_torch_constraints
 
 if "$VENV_PYTHON" -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" >/dev/null 2>&1; then
     success "PyTorch в .venv готов: $("$VENV_PYTHON" -c 'import torch; print(torch.__version__, "(CUDA:", torch.cuda.is_available(), ")")')"
 else
-    warn "PyTorch с CUDA не найден внутри .venv. Устанавливаем PyTorch 2.8.0 для CUDA 12.8..."
-    uv pip install --python "$VENV_PYTHON" \
-        torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 \
-        --index-url https://download.pytorch.org/whl/cu128
+    install_compatible_torch
 fi
 
 info "Устанавливаем зависимости ComfyUI..."
-uv pip install --python "$VENV_PYTHON" -r requirements.txt
+uv pip install --python "$VENV_PYTHON" \
+    -r requirements.txt \
+    --constraint "$TORCH_CONSTRAINTS" \
+    --extra-index-url "$TORCH_INDEX_URL"
 
 info "Устанавливаем/обновляем ComfyUI-Manager..."
 mkdir -p "$COMFY_DIR/custom_nodes"
@@ -133,7 +159,10 @@ else
 fi
 
 if [[ -f "$MANAGER_DIR/requirements.txt" ]]; then
-    uv pip install --python "$VENV_PYTHON" -r "$MANAGER_DIR/requirements.txt"
+    uv pip install --python "$VENV_PYTHON" \
+        -r "$MANAGER_DIR/requirements.txt" \
+        --constraint "$TORCH_CONSTRAINTS" \
+        --extra-index-url "$TORCH_INDEX_URL"
 fi
 
 info "Устанавливаем зависимости для Панели Управления (Gradio, psutil)..."
