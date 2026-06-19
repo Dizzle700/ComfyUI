@@ -22,14 +22,13 @@ export COMFY_ARGS="${COMFY_ARGS:---listen 0.0.0.0 --port 8188 --highvram}"
 # Держим тяжелые кэши моделей на persistent storage, а не на container disk.
 if [[ -d "/workspace" ]]; then
     export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/workspace/.cache}"
-    export UV_CACHE_DIR="${UV_CACHE_DIR:-/workspace/.cache/uv}"
     export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/workspace/.cache/pip}"
     export TORCH_HOME="${TORCH_HOME:-/workspace/.cache/torch}"
     export HF_HOME="${HF_HOME:-/workspace/.cache/huggingface}"
     export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-/workspace/.cache/huggingface/hub}"
     export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-/workspace/.cache/huggingface/transformers}"
     export DIFFUSERS_CACHE="${DIFFUSERS_CACHE:-/workspace/.cache/huggingface/diffusers}"
-    mkdir -p "$UV_CACHE_DIR" "$PIP_CACHE_DIR" "$TORCH_HOME" \
+    mkdir -p "$PIP_CACHE_DIR" "$TORCH_HOME" \
         "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE" "$DIFFUSERS_CACHE"
 fi
 

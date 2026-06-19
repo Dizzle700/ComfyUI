@@ -11,6 +11,7 @@ import tempfile
 import zipfile
 import queue
 import shlex
+import sys
 from collections import deque
 import gradio as gr
 import psutil
@@ -48,12 +49,9 @@ def get_download_logs():
     with download_lock:
         return "\n".join(download_logs)
 
-# Helper: построить команду uv pip install с учётом venv/system
-def build_uv_pip_cmd(*args):
-    venv_python = os.path.join(COMFY_DIR, ".venv", "bin", "python")
-    if os.path.exists(venv_python):
-        return ["uv", "pip", "install", "--python", venv_python, *args]
-    return ["uv", "pip", "install", "--system", *args]
+# Устанавливаем пакеты тем же Python, которым запущена панель.
+def build_pip_cmd(*args):
+    return [sys.executable, "-m", "pip", "install", *args]
 
 def get_system_stats():
     # Загрузка CPU и RAM
@@ -341,7 +339,7 @@ def install_custom_node(repo_url):
         req_file = os.path.join(target_node_dir, "requirements.txt")
         if os.path.exists(req_file):
             add_node_log(f"Обнаружен requirements.txt. Устанавливаем зависимости...")
-            cmd = build_uv_pip_cmd("-r", req_file)
+            cmd = build_pip_cmd("-r", req_file)
                 
             proc_req = subprocess.Popen(
                 cmd,
@@ -450,7 +448,7 @@ def install_sparkvsr():
         spark_req = os.path.join(spark_plugin_symlink, "requirements.txt")
         if os.path.exists(spark_req):
             add_node_log("Устанавливаем зависимости для ComfyUI-Spark...")
-            cmd = build_uv_pip_cmd("-r", spark_req)
+            cmd = build_pip_cmd("-r", spark_req)
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             while True:
                 line = proc.stdout.readline()
@@ -462,7 +460,7 @@ def install_sparkvsr():
         vhs_req = os.path.join(vhs_dir, "requirements.txt")
         if os.path.exists(vhs_req):
             add_node_log("Устанавливаем зависимости для VideoHelperSuite...")
-            cmd = build_uv_pip_cmd("-r", vhs_req)
+            cmd = build_pip_cmd("-r", vhs_req)
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             while True:
                 line = proc.stdout.readline()
@@ -472,7 +470,7 @@ def install_sparkvsr():
             
         # Дополнительные зависимости
         add_node_log("Устанавливаем дополнительные пакеты (peft, einops, fal-client)...")
-        cmd_extra = build_uv_pip_cmd("peft>=0.9.0", "einops>=0.6.0", "fal-client", "requests")
+        cmd_extra = build_pip_cmd("peft>=0.9.0", "einops>=0.6.0", "fal-client", "requests")
         proc_extra = subprocess.Popen(cmd_extra, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         while True:
             line = proc_extra.stdout.readline()

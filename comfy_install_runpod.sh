@@ -19,14 +19,13 @@ export COMFY_DIR
 
 if [[ -d "/workspace" ]]; then
     export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/workspace/.cache}"
-    export UV_CACHE_DIR="${UV_CACHE_DIR:-/workspace/.cache/uv}"
     export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/workspace/.cache/pip}"
     export TORCH_HOME="${TORCH_HOME:-/workspace/.cache/torch}"
     export HF_HOME="${HF_HOME:-/workspace/.cache/huggingface}"
     export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-/workspace/.cache/huggingface/hub}"
     export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-/workspace/.cache/huggingface/transformers}"
     export DIFFUSERS_CACHE="${DIFFUSERS_CACHE:-/workspace/.cache/huggingface/diffusers}"
-    mkdir -p "$UV_CACHE_DIR" "$PIP_CACHE_DIR" "$TORCH_HOME" \
+    mkdir -p "$PIP_CACHE_DIR" "$TORCH_HOME" \
         "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE" "$DIFFUSERS_CACHE"
 fi
 
@@ -75,16 +74,14 @@ else
     warn "Каталог /workspace не найден. Данные могут быть потеряны при остановке пода."
 fi
 
-ensure_uv() {
-    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-    if command -v uv >/dev/null 2>&1; then
-        success "uv готов к работе: $(uv --version)"
+ensure_venv_pip() {
+    if "$VENV_PYTHON" -m pip --version >/dev/null 2>&1; then
+        success "pip готов к работе: $("$VENV_PYTHON" -m pip --version)"
         return
     fi
 
-    info "uv не найден. Устанавливаем..."
-    curl --proto '=https' --tlsv1.2 -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    info "pip не найден в .venv. Устанавливаем через ensurepip..."
+    "$VENV_PYTHON" -m ensurepip --upgrade
 }
 
 write_torch_constraints() {
@@ -98,8 +95,7 @@ EOF
 
 install_compatible_torch() {
     warn "Устанавливаем PyTorch $TORCH_VERSION для CUDA $TORCH_CUDA_VERSION ($TORCH_INDEX_URL)..."
-    uv pip install --python "$VENV_PYTHON" \
-        --force-reinstall \
+    "$VENV_PYTHON" -m pip install \
         torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" torchaudio=="$TORCHAUDIO_VERSION" \
         --index-url "$TORCH_INDEX_URL"
 }
@@ -134,7 +130,6 @@ else
 fi
 
 cd "$COMFY_DIR"
-ensure_uv
 
 # В современных RunPod/PyTorch images системный Python часто externally managed,
 # поэтому зависимости ComfyUI ставим в venv. Если PyTorch уже есть в template,
@@ -150,15 +145,16 @@ fi
 if [[ ! -x .venv/bin/python ]]; then
     if [[ "$SYSTEM_TORCH_READY" == true ]]; then
         info "Создаем .venv с доступом к контейнерному PyTorch..."
-        uv venv --python python3 --system-site-packages .venv
+        python3 -m venv --system-site-packages .venv
     else
         info "Создаем изолированное виртуальное окружение .venv..."
-        uv venv --python python3 .venv
+        python3 -m venv .venv
     fi
 else
     success "Используем существующее окружение: $COMFY_DIR/.venv"
 fi
 VENV_PYTHON="$COMFY_DIR/.venv/bin/python"
+ensure_venv_pip
 write_torch_constraints
 
 if torch_matches_target "$VENV_PYTHON"; then
@@ -168,7 +164,7 @@ else
 fi
 
 info "Устанавливаем зависимости ComfyUI..."
-uv pip install --python "$VENV_PYTHON" \
+"$VENV_PYTHON" -m pip install \
     -r requirements.txt \
     --constraint "$TORCH_CONSTRAINTS" \
     --extra-index-url "$TORCH_INDEX_URL"
@@ -182,14 +178,14 @@ else
 fi
 
 if [[ -f "$MANAGER_DIR/requirements.txt" ]]; then
-    uv pip install --python "$VENV_PYTHON" \
+    "$VENV_PYTHON" -m pip install \
         -r "$MANAGER_DIR/requirements.txt" \
         --constraint "$TORCH_CONSTRAINTS" \
         --extra-index-url "$TORCH_INDEX_URL"
 fi
 
 info "Устанавливаем зависимости для Панели Управления (Gradio, psutil)..."
-uv pip install --python "$VENV_PYTHON" gradio psutil
+"$VENV_PYTHON" -m pip install gradio psutil
 
 # Копирование pisa_sr.pkl, если он лежит в папке со скриптом
 if [[ -f "$SCRIPT_DIR/pisa_sr.pkl" ]]; then
