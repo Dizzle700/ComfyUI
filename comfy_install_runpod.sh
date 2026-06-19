@@ -91,10 +91,22 @@ cd "$COMFY_DIR"
 ensure_uv
 
 # В современных RunPod/PyTorch images системный Python часто externally managed,
-# поэтому все Python-пакеты ставим в venv внутри /workspace/ComfyUI.
+# поэтому зависимости ComfyUI ставим в venv. Если PyTorch уже есть в template,
+# создаем venv с system-site-packages и не скачиваем torch повторно.
+SYSTEM_TORCH_READY=false
+if python3 -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" >/dev/null 2>&1; then
+    SYSTEM_TORCH_READY=true
+    success "Контейнерный PyTorch готов: $(python3 -c 'import torch; print(torch.__version__, "(CUDA:", torch.cuda.is_available(), ")")')"
+fi
+
 if [[ ! -x .venv/bin/python ]]; then
-    info "Создаем виртуальное окружение .venv..."
-    uv venv --python python3 .venv
+    if [[ "$SYSTEM_TORCH_READY" == true ]]; then
+        info "Создаем .venv с доступом к контейнерному PyTorch..."
+        uv venv --python python3 --system-site-packages .venv
+    else
+        info "Создаем изолированное виртуальное окружение .venv..."
+        uv venv --python python3 .venv
+    fi
 else
     success "Используем существующее окружение: $COMFY_DIR/.venv"
 fi
@@ -103,7 +115,7 @@ VENV_PYTHON="$COMFY_DIR/.venv/bin/python"
 if "$VENV_PYTHON" -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" >/dev/null 2>&1; then
     success "PyTorch в .venv готов: $("$VENV_PYTHON" -c 'import torch; print(torch.__version__, "(CUDA:", torch.cuda.is_available(), ")")')"
 else
-    info "Устанавливаем PyTorch 2.8.0 для CUDA 12.8..."
+    warn "PyTorch с CUDA не найден внутри .venv. Устанавливаем PyTorch 2.8.0 для CUDA 12.8..."
     uv pip install --python "$VENV_PYTHON" \
         torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 \
         --index-url https://download.pytorch.org/whl/cu128

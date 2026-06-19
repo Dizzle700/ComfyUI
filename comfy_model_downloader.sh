@@ -455,14 +455,13 @@ download_model() {
             dir=$inferred_dir
         else
             read -r -p "Enter — принять, m — выбрать папку вручную: " answer || return
-        fi
-        if [[ "$batch_mode" != true &&
-            ( "${answer,,}" == "m" || "${answer,,}" == "м" ) ]]; then
-            select_model_folder "$models_dir" || return 1
-            dir=$SELECTED_MODEL_DIR
-            selection_mode=manual
-        elif [[ "$batch_mode" != true ]]; then
-            dir=$inferred_dir
+            if [[ "${answer,,}" == "m" || "${answer,,}" == "м" ]]; then
+                select_model_folder "$models_dir" || return 1
+                dir=$SELECTED_MODEL_DIR
+                selection_mode=manual
+            else
+                dir=$inferred_dir
+            fi
         fi
     elif [[ -z "$forced_folder" ]]; then
         info "По имени тип неясен. Определим его после загрузки по содержимому файла."
