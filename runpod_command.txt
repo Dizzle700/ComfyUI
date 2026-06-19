@@ -1,9 +1,10 @@
 # Скопируйте и вставьте эту команду в поле "Docker Command" или "Startup Command" в настройках пода на RunPod:
 
-bash -c "cd /workspace && ( [ -f runpod_startup.sh ] || git clone https://github.com/Dizzle700/ComfyUI.git . ) && bash runpod_startup.sh"
+bash -lc "cd /workspace && if [ ! -d runpod-scripts/.git ]; then git clone --depth 1 https://github.com/Dizzle700/ComfyUI.git runpod-scripts; else git -C runpod-scripts pull --ff-only; fi && bash runpod-scripts/runpod_startup.sh"
 
 # Инструкция:
 # 1. Перед запуском убедитесь, что последние изменения запушены в репозиторий.
-# 2. Не забудьте открыть HTTP Ports в настройках RunPod:
+# 2. Эта версия хранит startup-скрипты в /workspace/runpod-scripts и обновляет их при рестарте.
+# 3. Не забудьте открыть HTTP Ports в настройках RunPod:
 #    - Port 7860 (для Панели Управления)
 #    - Port 8188 (для ComfyUI)

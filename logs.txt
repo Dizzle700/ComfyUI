@@ -1,0 +1,98 @@
+2026-06-19T07:49:12.116396007Z ==========
+2026-06-19T07:49:12.116400357Z == CUDA ==
+2026-06-19T07:49:12.116456157Z ==========
+2026-06-19T07:49:12.120824883Z CUDA Version 12.8.1
+2026-06-19T07:49:12.122507134Z Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+2026-06-19T07:49:12.124260774Z This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+2026-06-19T07:49:12.124264994Z By pulling and using the container, you accept the terms and conditions of this license:
+2026-06-19T07:49:12.124268004Z https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+2026-06-19T07:49:12.124273964Z A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+2026-06-19T07:49:12.142942090Z Cloning into '.'...
+2026-06-19T07:49:15.313511250Z === ЗАПУСК КОНТЕЙНЕРА RUNPOD: Fri Jun 19 07:49:15 UTC 2026 ===
+2026-06-19T07:49:15.329332532Z Обнаружен comfy_install_runpod.sh. Запуск автоматической установки и панели управления...
+2026-06-19T07:49:15.348085008Z [0;34mОбнаружено окружение RunPod. Установка будет выполнена в /workspace/ComfyUI (persistent storage).[0m
+2026-06-19T07:49:15.348315837Z [0;34mКлонируем репозиторий ComfyUI...[0m
+2026-06-19T07:49:15.354993780Z Cloning into '/workspace/ComfyUI'...
+2026-06-19T07:49:22.247044815Z Updating files:  27% (259/942)Updating files:  28% (264/942)Updating files:  29% (274/942)Updating files:  30% (283/942)Updating files:  31% (293/942)Updating files:  32% (302/942)Updating files:  33% (311/942)Updating files:  34% (321/942)Updating files:  35% (330/942)Updating files:  36% (340/942)Updating files:  37% (349/942)Updating files:  38% (358/942)Updating files:  39% (368/942)Updating files:  40% (377/942)Updating files:  41% (387/942)Updating files:  42% (396/942)Updating files:  43% (406/942)Updating files:  44% (415/942)Updating files:  45% (424/942)Updating files:  46% (434/942)Updating files:  47% (443/942)Updating files:  48% (453/942)Updating files:  49% (462/942)Updating files:  49% (469/942)Updating files:  50% (471/942)Updating files:  51% (481/942)Updating files:  52% (490/942)Updating files:  53% (500/942)Updating files:  54% (509/942)Updating files:  55% (519/942)Updating files:  56% (528/942)Updating files:  57% (537/942)Updating files:  58% (547/942)Updating files:  59% (556/942)Updating files:  60% (566/942)Updating files:  61% (575/942)Updating files:  62% (585/942)Updating files:  63% (594/942)Updating files:  64% (603/942)Updating files:  65% (613/942)Updating files:  65% (617/942)Updating files:  66% (622/942)Updating files:  67% (632/942)Updating files:  68% (641/942)Updating files:  69% (650/942)Updating files:  70% (660/942)Updating files:  71% (669/942)Updating files:  72% (679/942)Updating files:  73% (688/942)Updating files:  74% (698/942)Updating files:  75% (707/942)Updating files:  76% (716/942)Updating files:  77% (726/942)Updating files:  78% (735/942)Updating files:  79% (745/942)Updating files:  80% (754/942)Updating files:  81% (764/942)Updating files:  82% (773/942)Updating files:  83% (782/942)Updating files:  84% (792/942)Updating files:  85% (801/942)Updating files:  86% (811/942)Updating files:  87% (820/942)Updating files:  88% (829/942)Updating files:  89% (839/942)Updating files:  89% (846/942)Updating files:  90% (848/942)Updating files:  91% (858/942)Updating files:  92% (867/942)Updating files:  93% (877/942)Updating files:  94% (886/942)Updating files:  95% (895/942)Updating files:  96% (905/942)Updating files:  97% (914/942)Updating files:  98% (924/942)Updating files:  99% (933/942)Updating files: 100% (942/942)Updating files: 100% (942/942), done.
+2026-06-19T07:49:22.274933971Z [0;32muv готов к работе: uv 0.9.0[0m
+2026-06-19T07:49:27.020491222Z [0;32mОбнаружен предустановленный PyTorch: 2.8.0+cu128 (CUDA: True )[0m
+2026-06-19T07:49:27.020650581Z [0;34mУстанавливаем зависимости ComfyUI в системное окружение...[0m
+2026-06-19T07:49:27.185688626Z Using Python 3.12.3 environment at: /usr
+2026-06-19T07:49:27.187546686Z error: The interpreter at /usr is externally managed, and indicates the following:
+2026-06-19T07:49:27.187609316Z   To install Python packages system-wide, try apt install
+2026-06-19T07:49:27.187616376Z   python3-xyz, where xyz is the package you are trying to
+2026-06-19T07:49:27.187622086Z   install.
+2026-06-19T07:49:27.187634396Z   If you wish to install a non-Debian-packaged Python package,
+2026-06-19T07:49:27.187640275Z   create a virtual environment using python3 -m venv path/to/venv.
+2026-06-19T07:49:27.187647185Z   Then use path/to/venv/bin/python and path/to/venv/bin/pip. Make
+2026-06-19T07:49:27.187652955Z   sure you have python3-full installed.
+2026-06-19T07:49:27.187664435Z   If you wish to install a non-Debian packaged Python application,
+2026-06-19T07:49:27.187670275Z   it may be easiest to use pipx install xyz, which will manage a
+2026-06-19T07:49:27.187676125Z   virtual environment for you. Make sure you have pipx installed.
+2026-06-19T07:49:27.187687425Z   See /usr/share/doc/python3.12/README.venv for more information.
+2026-06-19T07:49:27.187698855Z Consider creating a virtual environment with `uv venv`.
+2026-06-19T07:49:27.190571729Z [0;31mОшибка на строке 98 (код: 2). Установка остановлена.[0m
+2026-06-19T07:49:28.932043538Z ==========
+2026-06-19T07:49:28.932048248Z == CUDA ==
+2026-06-19T07:49:28.932143098Z ==========
+2026-06-19T07:49:28.936958291Z CUDA Version 12.8.1
+2026-06-19T07:49:28.938567362Z Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+2026-06-19T07:49:28.939799355Z This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+2026-06-19T07:49:28.939803435Z By pulling and using the container, you accept the terms and conditions of this license:
+2026-06-19T07:49:28.939807275Z https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+2026-06-19T07:49:28.939813385Z A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+2026-06-19T07:49:28.962726288Z === ЗАПУСК КОНТЕЙНЕРА RUNPOD: Fri Jun 19 07:49:28 UTC 2026 ===
+2026-06-19T07:49:28.973266850Z Обнаружен comfy_install_runpod.sh. Запуск автоматической установки и панели управления...
+2026-06-19T07:49:28.986444527Z [0;34mОбнаружено окружение RunPod. Установка будет выполнена в /workspace/ComfyUI (persistent storage).[0m
+2026-06-19T07:49:28.986867955Z [0;34mРепозиторий ComfyUI уже существует. Обновляем...[0m
+2026-06-19T07:49:29.540880874Z Already up to date.
+2026-06-19T07:49:29.554141911Z [0;32muv готов к работе: uv 0.9.0[0m
+2026-06-19T07:49:34.141890946Z [0;32mОбнаружен предустановленный PyTorch: 2.8.0+cu128 (CUDA: True )[0m
+2026-06-19T07:49:34.141944056Z [0;34mУстанавливаем зависимости ComfyUI в системное окружение...[0m
+2026-06-19T07:49:34.174074518Z Using Python 3.12.3 environment at: /usr
+2026-06-19T07:49:34.175140992Z error: The interpreter at /usr is externally managed, and indicates the following:
+2026-06-19T07:49:34.175207462Z   To install Python packages system-wide, try apt install
+2026-06-19T07:49:34.175213812Z   python3-xyz, where xyz is the package you are trying to
+2026-06-19T07:49:34.175219812Z   install.
+2026-06-19T07:49:34.175231492Z   If you wish to install a non-Debian-packaged Python package,
+2026-06-19T07:49:34.175258461Z   create a virtual environment using python3 -m venv path/to/venv.
+2026-06-19T07:49:34.175265331Z   Then use path/to/venv/bin/python and path/to/venv/bin/pip. Make
+2026-06-19T07:49:34.175270981Z   sure you have python3-full installed.
+2026-06-19T07:49:34.175283081Z   If you wish to install a non-Debian packaged Python application,
+2026-06-19T07:49:34.175288761Z   it may be easiest to use pipx install xyz, which will manage a
+2026-06-19T07:49:34.175294351Z   virtual environment for you. Make sure you have pipx installed.
+2026-06-19T07:49:34.175305471Z   See /usr/share/doc/python3.12/README.venv for more information.
+2026-06-19T07:49:34.175316311Z Consider creating a virtual environment with `uv venv`.
+2026-06-19T07:49:34.177810907Z [0;31mОшибка на строке 98 (код: 2). Установка остановлена.[0m
+2026-06-19T07:49:45.765619810Z ==========
+2026-06-19T07:49:45.765624700Z == CUDA ==
+2026-06-19T07:49:45.765679520Z ==========
+2026-06-19T07:49:45.769915586Z CUDA Version 12.8.1
+2026-06-19T07:49:45.771166449Z Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+2026-06-19T07:49:45.772453232Z This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+2026-06-19T07:49:45.772464372Z By pulling and using the container, you accept the terms and conditions of this license:
+2026-06-19T07:49:45.772470712Z https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+2026-06-19T07:49:45.772482812Z A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+2026-06-19T07:49:45.797009536Z === ЗАПУСК КОНТЕЙНЕРА RUNPOD: Fri Jun 19 07:49:45 UTC 2026 ===
+2026-06-19T07:49:45.810022364Z Обнаружен comfy_install_runpod.sh. Запуск автоматической установки и панели управления...
+2026-06-19T07:49:45.826840051Z [0;34mОбнаружено окружение RunPod. Установка будет выполнена в /workspace/ComfyUI (persistent storage).[0m
+2026-06-19T07:49:45.827530107Z [0;34mРепозиторий ComfyUI уже существует. Обновляем...[0m
+2026-06-19T07:49:46.354171278Z Already up to date.
+2026-06-19T07:49:46.364730330Z [0;32muv готов к работе: uv 0.9.0[0m
+2026-06-19T07:49:50.407054288Z [0;32mОбнаружен предустановленный PyTorch: 2.8.0+cu128 (CUDA: True )[0m
+2026-06-19T07:49:50.407828354Z [0;34mУстанавливаем зависимости ComfyUI в системное окружение...[0m
+2026-06-19T07:49:50.435119382Z Using Python 3.12.3 environment at: /usr
+2026-06-19T07:49:50.436047157Z error: The interpreter at /usr is externally managed, and indicates the following:
+2026-06-19T07:49:50.436099557Z   To install Python packages system-wide, try apt install
+2026-06-19T07:49:50.436105917Z   python3-xyz, where xyz is the package you are trying to
+2026-06-19T07:49:50.436111677Z   install.
+2026-06-19T07:49:50.436123217Z   If you wish to install a non-Debian-packaged Python package,
+2026-06-19T07:49:50.436128857Z   create a virtual environment using python3 -m venv path/to/venv.
+2026-06-19T07:49:50.436135177Z   Then use path/to/venv/bin/python and path/to/venv/bin/pip. Make
+2026-06-19T07:49:50.436140907Z   sure you have python3-full installed.
+2026-06-19T07:49:50.436152537Z   If you wish to install a non-Debian packaged Python application,
+2026-06-19T07:49:50.436158297Z   it may be easiest to use pipx install xyz, which will manage a
+2026-06-19T07:49:50.436163857Z   virtual environment for you. Make sure you have pipx installed.
+2026-06-19T07:49:50.436174866Z   See /usr/share/doc/python3.12/README.venv for more information.
+2026-06-19T07:49:50.436185816Z Consider creating a virtual environment with `uv venv`.
+2026-06-19T07:49:50.438564763Z [0;31mОшибка на строке 98 (код: 2). Установка остановлена.[0m
