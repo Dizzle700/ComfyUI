@@ -396,6 +396,8 @@ download_model() {
     local supplied_url=${1:-}
     local forced_folder=${2:-}
     local batch_mode=${3:-false}
+    local supplied_filename=${4:-}
+    local assume_yes=${5:-false}
     local models_dir="$COMFY_DIR/models"
     local download_dir="$COMFY_DIR/.model-downloads"
     local url url_path suggested_name filename destination header_file temp_file
@@ -423,7 +425,9 @@ download_model() {
     suggested_name=${url_path##*/}
     [[ -n "$suggested_name" && "$suggested_name" != "download" ]] || \
         suggested_name="model.safetensors"
-    if [[ "$batch_mode" == true ]]; then
+    if [[ -n "$supplied_filename" ]]; then
+        filename=$supplied_filename
+    elif [[ "$batch_mode" == true || "$assume_yes" == true ]]; then
         filename=$suggested_name
     else
         read -r -p "Имя файла [$suggested_name]: " filename || return
@@ -447,7 +451,7 @@ download_model() {
         inferred_dir=${inference%%|*}
         inference_reason=${inference#*|}
         info "Автоопределение: $inferred_dir ($inference_reason)"
-        if [[ "$batch_mode" == true ]]; then
+        if [[ "$batch_mode" == true || "$assume_yes" == true ]]; then
             dir=$inferred_dir
         else
             read -r -p "Enter — принять, m — выбрать папку вручную: " answer || return
@@ -545,7 +549,7 @@ download_model() {
     fi
 
     if [[ -z "$dir" ]]; then
-        if [[ "$batch_mode" == true ]]; then
+        if [[ "$batch_mode" == true || "$assume_yes" == true ]]; then
             error "Автоматически определить папку не удалось. Используйте --folder ИМЯ."
             warn "Загруженный файл оставлен для продолжения: $temp_file"
             return 1
@@ -559,7 +563,7 @@ download_model() {
     mkdir -p "$models_dir/$dir"
     destination="$models_dir/$dir/$filename"
     if [[ -e "$destination" ]]; then
-        if [[ "$batch_mode" == true ]]; then
+        if [[ "$batch_mode" == true || "$assume_yes" == true ]]; then
             warn "Файл уже существует, пропускаем: $destination"
             rm -f -- "$temp_file"
             return 10
@@ -691,7 +695,7 @@ print_usage() {
     cat <<'EOF'
 Использование:
   comfy-model-downloader
-  comfy-model-downloader --download [--folder ПАПКА]
+  comfy-model-downloader --download [URL] [--folder ПАПКА] [--filename ИМЯ] [--yes]
   comfy-model-downloader --batch models.txt [--folder ПАПКА]
   comfy-model-downloader --batch models.txt --vae
   comfy-model-downloader --tokens
@@ -706,12 +710,18 @@ EOF
 }
 
 run_cli() {
-    local action='' list_file='' forced_folder='' option
+    local action='' list_file='' forced_folder='' download_url='' download_filename='' assume_yes=false option
 
     while (( $# > 0 )); do
         option=$1
         case "$option" in
-            --download) action=download ;;
+            --download)
+                action=download
+                if (( $# > 1 )) && [[ "$2" != --* ]]; then
+                    download_url=$2
+                    shift
+                fi
+                ;;
             --batch)
                 action=batch
                 if (( $# > 1 )) && [[ "$2" != --* ]]; then
@@ -725,6 +735,13 @@ run_cli() {
                 shift
                 ;;
             --folder=*) forced_folder=${option#--folder=} ;;
+            --filename)
+                (( $# > 1 )) || { error "После --filename укажите имя файла."; return 2; }
+                download_filename=$2
+                shift
+                ;;
+            --filename=*) download_filename=${option#--filename=} ;;
+            --yes|-y) assume_yes=true ;;
             --tokens) action=tokens ;;
             --install-global) action=install ;;
             --help|-h) print_usage; return ;;
@@ -735,6 +752,8 @@ run_cli() {
             *)
                 if [[ "$action" == batch && -z "$list_file" ]]; then
                     list_file=$option
+                elif [[ "$action" == download && -z "$download_url" ]]; then
+                    download_url=$option
                 else
                     error "Неизвестный аргумент: $option"
                     print_usage
@@ -747,7 +766,7 @@ run_cli() {
 
     case "${action:-menu}" in
         menu) main ;;
-        download) download_model '' "$forced_folder" false ;;
+        download) download_model "$download_url" "$forced_folder" false "$download_filename" "$assume_yes" ;;
         batch) download_batch "$list_file" "$forced_folder" ;;
         tokens) configure_tokens ;;
         install) install_global_command ;;

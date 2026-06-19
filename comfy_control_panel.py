@@ -390,8 +390,9 @@ def install_sparkvsr():
         spark_req = os.path.join(spark_plugin_symlink, "requirements.txt")
         if os.path.exists(spark_req):
             add_node_log("Устанавливаем зависимости для ComfyUI-Spark...")
-            cmd = ["uv", "pip", "install", "--python" if is_venv else "--system", venv_python if is_venv else "-r", spark_req]
-            if not is_venv:
+            if is_venv:
+                cmd = ["uv", "pip", "install", "--python", venv_python, "-r", spark_req]
+            else:
                 cmd = ["uv", "pip", "install", "--system", "-r", spark_req]
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             while True:
@@ -404,8 +405,9 @@ def install_sparkvsr():
         vhs_req = os.path.join(vhs_dir, "requirements.txt")
         if os.path.exists(vhs_req):
             add_node_log("Устанавливаем зависимости для VideoHelperSuite...")
-            cmd = ["uv", "pip", "install", "--python" if is_venv else "--system", venv_python if is_venv else "-r", vhs_req]
-            if not is_venv:
+            if is_venv:
+                cmd = ["uv", "pip", "install", "--python", venv_python, "-r", vhs_req]
+            else:
                 cmd = ["uv", "pip", "install", "--system", "-r", vhs_req]
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             while True:
@@ -416,9 +418,16 @@ def install_sparkvsr():
             
         # Дополнительные зависимости
         add_node_log("Устанавливаем дополнительные пакеты (peft, einops, fal-client)...")
-        cmd_extra = ["uv", "pip", "install", "--python" if is_venv else "--system", venv_python if is_venv else "peft>=0.9.0", "einops>=0.6.0", "fal-client", "requests"]
-        if not is_venv:
-            cmd_extra = ["uv", "pip", "install", "--system", "peft>=0.9.0", "einops>=0.6.0", "fal-client", "requests"]
+        if is_venv:
+            cmd_extra = [
+                "uv", "pip", "install", "--python", venv_python,
+                "peft>=0.9.0", "einops>=0.6.0", "fal-client", "requests",
+            ]
+        else:
+            cmd_extra = [
+                "uv", "pip", "install", "--system",
+                "peft>=0.9.0", "einops>=0.6.0", "fal-client", "requests",
+            ]
         subprocess.run(cmd_extra, check=True)
         
         # 4. Скачивание весов
@@ -496,58 +505,31 @@ def run_download_model(url, folder, filename):
         add_download_log(f"--- Старт загрузки: {time.strftime('%H:%M:%S')} ---")
         add_download_log(f"Ссылка: {url}")
         
-        cmd = [DOWNLOADER_SCRIPT, "--download"]
+        cmd = [DOWNLOADER_SCRIPT, "--download", url, "--yes"]
         if folder and folder != "Автоопределение (Auto-detect)":
             cmd += ["--folder", folder]
+        if filename.strip():
+            cmd += ["--filename", filename.strip()]
         
         # Запуск процесса
         env = os.environ.copy()
         env["COMFY_DIR"] = COMFY_DIR
         
-        # Если пользователь ввел кастомное имя
         proc = subprocess.Popen(
             cmd,
             env=env,
-            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1
         )
         
-        # Нам нужно передать имя файла в stdin, если загрузчик его запрашивает
-        # Загрузчик запрашивает:
-        # 1) Имя файла [default]: 
-        # 2) Подтверждение (если автоопределение не сработало или выбор ручной)
-        # Мы пишем интерактивный мост для неинтерактивного скрипта:
-        
-        has_sent_filename = False
         while True:
             line = proc.stdout.readline()
             if not line:
                 break
             
-            clean_line = line.strip()
-            add_download_log(clean_line)
-            
-            # Обнаружение запроса имени файла
-            if "Имя файла [" in line or "Имя файла:" in line:
-                if not has_sent_filename:
-                    val = filename.strip() + "\n" if filename.strip() else "\n"
-                    proc.stdin.write(val)
-                    proc.stdin.flush()
-                    has_sent_filename = True
-            
-            # Обнаружение запросов выбора папок или согласия на перезапись
-            elif "Номер папки:" in line:
-                proc.stdin.write("\n") # по умолчанию
-                proc.stdin.flush()
-            elif "Перезаписать?" in line or "Продолжить?" in line:
-                proc.stdin.write("y\n")
-                proc.stdin.flush()
-            elif "принять, m — выбрать" in line:
-                proc.stdin.write("\n") # принять автоопределение
-                proc.stdin.flush()
+            add_download_log(line.strip())
                 
         proc.wait()
         add_download_log(f"--- Загрузка завершена с кодом {proc.returncode} ---")
@@ -770,12 +752,14 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
     )
     
     # Выбор строки в таблице
-    def select_file_from_table(evt: gr.SelectData):
-        # Таблица возвращает список списков, evt.index содержит [строка, колонка]
-        # Нам нужно имя файла, которое находится в первой колонке выбранной строки
-        return evt.value
+    def select_file_from_table(table_data, evt: gr.SelectData):
+        row_index = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+        try:
+            return table_data[row_index][0]
+        except Exception:
+            return ""
         
-    model_files_table.select(select_file_from_table, outputs=[selected_file_name])
+    model_files_table.select(select_file_from_table, inputs=[model_files_table], outputs=[selected_file_name])
     
     btn_delete_file.click(
         delete_model_file, 

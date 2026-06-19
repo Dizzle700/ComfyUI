@@ -15,6 +15,24 @@ if [[ -d "/workspace" ]]; then
 else
     COMFY_DIR="${COMFY_DIR:-$SCRIPT_DIR/ComfyUI}"
 fi
+export COMFY_DIR
+
+START_PANEL=true
+for arg in "$@"; do
+    case "$arg" in
+        --no-start) START_PANEL=false ;;
+        --help|-h)
+            cat <<'EOF'
+Использование:
+  comfy_install_runpod.sh [--no-start]
+
+Опции:
+  --no-start    Установить/обновить ComfyUI без запуска панели управления.
+EOF
+            exit 0
+            ;;
+    esac
+done
 
 COMFY_REPO="https://github.com/Comfy-Org/ComfyUI.git"
 MANAGER_DIR="$COMFY_DIR/custom_nodes/comfyui-manager"
@@ -93,8 +111,11 @@ if python3 -c "import torch" >/dev/null 2>&1; then
     fi
 
     success "Автоматическая установка ComfyUI завершена!"
-    info "Запускаем Графическую Панель Управления (comfy_control_panel.py)..."
-    exec python3 "$SCRIPT_DIR/comfy_control_panel.py"
+    if [[ "$START_PANEL" == true ]]; then
+        info "Запускаем Графическую Панель Управления (comfy_control_panel.py)..."
+        exec python3 "$SCRIPT_DIR/comfy_control_panel.py"
+    fi
+    info "Флаг --no-start указан: панель управления не запускаем."
 else
     # Альтернативный вариант с виртуальным окружением, если PyTorch нет в системе
     info "PyTorch не найден. Создаем виртуальное окружение .venv..."
@@ -129,6 +150,9 @@ else
     fi
 
     success "Автоматическая установка ComfyUI в .venv завершена!"
-    info "Запускаем Графическую Панель Управления..."
-    exec .venv/bin/python "$SCRIPT_DIR/comfy_control_panel.py"
+    if [[ "$START_PANEL" == true ]]; then
+        info "Запускаем Графическую Панель Управления..."
+        exec .venv/bin/python "$SCRIPT_DIR/comfy_control_panel.py"
+    fi
+    info "Флаг --no-start указан: панель управления не запускаем."
 fi
