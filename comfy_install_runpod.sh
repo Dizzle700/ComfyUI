@@ -17,6 +17,15 @@ else
 fi
 export COMFY_DIR
 
+if [[ -d "/workspace" ]]; then
+    export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/workspace/.cache}"
+    export HF_HOME="${HF_HOME:-/workspace/.cache/huggingface}"
+    export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-/workspace/.cache/huggingface/hub}"
+    export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-/workspace/.cache/huggingface/transformers}"
+    export DIFFUSERS_CACHE="${DIFFUSERS_CACHE:-/workspace/.cache/huggingface/diffusers}"
+    mkdir -p "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE" "$DIFFUSERS_CACHE"
+fi
+
 START_PANEL=true
 for arg in "$@"; do
     case "$arg" in
@@ -121,8 +130,10 @@ else
     info "PyTorch не найден. Создаем виртуальное окружение .venv..."
     uv venv --python 3.10 .venv
     
-    info "Устанавливаем PyTorch..."
-    uv pip install --python .venv/bin/python torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+    info "Устанавливаем PyTorch 2.8.0 для CUDA 12.8..."
+    uv pip install --python .venv/bin/python \
+        torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 \
+        --index-url https://download.pytorch.org/whl/cu128
     
     info "Устанавливаем зависимости ComfyUI..."
     uv pip install --python .venv/bin/python -r requirements.txt

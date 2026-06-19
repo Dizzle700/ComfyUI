@@ -11,6 +11,16 @@ echo "=== ЗАПУСК КОНТЕЙНЕРА RUNPOD: $(date) ==="
 # Определяем директорию, в которой находится этот скрипт
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
+# Держим тяжелые кэши моделей на persistent storage, а не на container disk.
+if [[ -d "/workspace" ]]; then
+    export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/workspace/.cache}"
+    export HF_HOME="${HF_HOME:-/workspace/.cache/huggingface}"
+    export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-/workspace/.cache/huggingface/hub}"
+    export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-/workspace/.cache/huggingface/transformers}"
+    export DIFFUSERS_CACHE="${DIFFUSERS_CACHE:-/workspace/.cache/huggingface/diffusers}"
+    mkdir -p "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE" "$DIFFUSERS_CACHE"
+fi
+
 # Проверяем наличие основного установщика
 if [[ -f "$SCRIPT_DIR/comfy_install_runpod.sh" ]]; then
     echo "Обнаружен comfy_install_runpod.sh. Запуск автоматической установки и панели управления..."
