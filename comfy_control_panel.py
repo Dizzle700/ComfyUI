@@ -874,6 +874,18 @@ def make_zip_from_folder(folder_path):
                 archive.write(full_path, archive_name)
     return archive_path
 
+def download_comfy_output_folder():
+    output_dir = os.path.join(COMFY_DIR, "output")
+    if not os.path.isdir(output_dir):
+        return None, f"Папка результатов не найдена: {output_dir}"
+    has_files = any(files for _, _, files in os.walk(output_dir))
+    if not has_files:
+        return None, f"Папка результатов пуста: {output_dir}"
+    try:
+        return make_zip_from_folder(output_dir), "Папка output упакована в ZIP."
+    except Exception as exc:
+        return None, f"Ошибка упаковки output: {exc}"
+
 def workspace_download_selected(path, selected_name):
     if not selected_name:
         return None, "Не выбран файл или папка."
@@ -1003,6 +1015,10 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                     with gr.Row():
                         btn_install = gr.Button("🚀 Установить ComfyUI с нуля", variant="secondary")
                         btn_refresh = gr.Button("🔄 Обновить статус")
+
+                    btn_download_output = gr.Button("⬇️ Скачать output ZIP", variant="secondary")
+                    output_download_file = gr.File(label="Output ZIP", interactive=False)
+                    output_download_status = gr.Markdown("")
                     
                 with gr.Column(scale=2):
                     gr.Markdown("### 📈 Ресурсы системы")
@@ -1190,6 +1206,10 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
     btn_restart.click(restart_comfy, inputs=[comfy_args], outputs=[status_indicator])
     btn_stop.click(stop_comfy, outputs=[status_indicator])
     btn_install.click(run_installation, outputs=[status_indicator])
+    btn_download_output.click(
+        download_comfy_output_folder,
+        outputs=[output_download_file, output_download_status],
+    )
     
     def refresh_dashboard(num_lines):
         status, pid = get_comfy_status()
