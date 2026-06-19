@@ -50,10 +50,11 @@ done
 COMFY_REPO="https://github.com/Comfy-Org/ComfyUI.git"
 MANAGER_DIR="$COMFY_DIR/custom_nodes/comfyui-manager"
 MANAGER_REPO="https://github.com/Comfy-Org/ComfyUI-Manager.git"
-TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
+TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
 TORCH_VERSION="${TORCH_VERSION:-2.8.0}"
 TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.23.0}"
 TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.8.0}"
+TORCH_CUDA_VERSION="${TORCH_CUDA_VERSION:-12.8}"
 
 info() { printf '%b\n' "${BLUE}$*${NC}"; }
 success() { printf '%b\n' "${GREEN}$*${NC}"; }
@@ -96,11 +97,31 @@ EOF
 }
 
 install_compatible_torch() {
-    warn "Устанавливаем PyTorch $TORCH_VERSION для CUDA 13.0 wheels ($TORCH_INDEX_URL)..."
+    warn "Устанавливаем PyTorch $TORCH_VERSION для CUDA $TORCH_CUDA_VERSION ($TORCH_INDEX_URL)..."
     uv pip install --python "$VENV_PYTHON" \
         --force-reinstall \
         torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" torchaudio=="$TORCHAUDIO_VERSION" \
         --index-url "$TORCH_INDEX_URL"
+}
+
+torch_matches_target() {
+    local python_exe=$1
+    "$python_exe" - "$TORCH_VERSION" "$TORCH_CUDA_VERSION" <<'PY' >/dev/null 2>&1
+import sys
+import torch
+
+expected_torch = sys.argv[1]
+expected_cuda = sys.argv[2]
+installed_torch = torch.__version__.split("+", 1)[0]
+installed_cuda = str(torch.version.cuda or "")
+
+ok = (
+    torch.cuda.is_available()
+    and installed_torch == expected_torch
+    and installed_cuda == expected_cuda
+)
+raise SystemExit(0 if ok else 1)
+PY
 }
 
 # Клонируем или обновляем ComfyUI
@@ -119,9 +140,11 @@ ensure_uv
 # поэтому зависимости ComfyUI ставим в venv. Если PyTorch уже есть в template,
 # создаем venv с system-site-packages и не скачиваем torch повторно.
 SYSTEM_TORCH_READY=false
-if python3 -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" >/dev/null 2>&1; then
+if torch_matches_target python3; then
     SYSTEM_TORCH_READY=true
-    success "Контейнерный PyTorch готов: $(python3 -c 'import torch; print(torch.__version__, "(CUDA:", torch.cuda.is_available(), ")")')"
+    success "Контейнерный PyTorch подходит: $(python3 -c 'import torch; print(torch.__version__, "(CUDA", torch.version.cuda, ")")')"
+elif python3 -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" >/dev/null 2>&1; then
+    warn "Предустановленный PyTorch не совпадает с целевым стеком $TORCH_VERSION + CUDA $TORCH_CUDA_VERSION."
 fi
 
 if [[ ! -x .venv/bin/python ]]; then
@@ -138,8 +161,8 @@ fi
 VENV_PYTHON="$COMFY_DIR/.venv/bin/python"
 write_torch_constraints
 
-if "$VENV_PYTHON" -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" >/dev/null 2>&1; then
-    success "PyTorch в .venv готов: $("$VENV_PYTHON" -c 'import torch; print(torch.__version__, "(CUDA:", torch.cuda.is_available(), ")")')"
+if torch_matches_target "$VENV_PYTHON"; then
+    success "PyTorch в .venv готов: $("$VENV_PYTHON" -c 'import torch; print(torch.__version__, "(CUDA", torch.version.cuda, ")")')"
 else
     install_compatible_torch
 fi

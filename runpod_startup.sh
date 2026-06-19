@@ -2,14 +2,22 @@
 
 set -Eeuo pipefail
 
+# Определяем директорию, в которой находится этот скрипт.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
 # Логируем весь вывод скрипта запуска
-LOG_FILE="/workspace/runpod_startup.log"
+if [[ -d "/workspace" ]]; then
+    LOG_FILE="${RUNPOD_LOG_FILE:-/workspace/runpod_startup.log}"
+else
+    LOG_FILE="${RUNPOD_LOG_FILE:-$SCRIPT_DIR/runpod_startup.log}"
+fi
 exec > >(tee -i "$LOG_FILE") 2>&1
 
 echo "=== ЗАПУСК КОНТЕЙНЕРА RUNPOD: $(date) ==="
 
-# Определяем директорию, в которой находится этот скрипт
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Панель запустит ComfyUI как дочерний процесс после установки/обновления.
+export AUTO_START_COMFY="${AUTO_START_COMFY:-1}"
+export COMFY_ARGS="${COMFY_ARGS:---listen 0.0.0.0 --port 8188 --highvram}"
 
 # Держим тяжелые кэши моделей на persistent storage, а не на container disk.
 if [[ -d "/workspace" ]]; then

@@ -4,13 +4,19 @@
 # Инструкция:
 # 1. Перед запуском убедитесь, что последние изменения запушены в репозиторий.
 # 2. Эта версия хранит startup-скрипты в /workspace/runpod-scripts и обновляет их при рестарте.
+#    Рекомендуемый образ для RTX 5090:
+#    runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
 # 3. Не забудьте открыть HTTP Ports в настройках RunPod:
 #    - Port 7860 (для Панели Управления)
 #    - Port 8188 (для ComfyUI)
+# 4. ComfyUI запускается автоматически вместе с панелью. Чтобы отключить это,
+#    задайте переменную окружения AUTO_START_COMFY=0.
+# 5. Панель содержит файловый менеджер и Terminal. Для публичного пода обязательно
+#    задайте RunPod Secrets/Environment Variables: PANEL_USER и PANEL_PASS.
 
 
 
 bash -lc "cd /workspace && if [ ! -d runpod-scripts/.git ]; then git clone --depth 1 https://github.com/Dizzle700/ComfyUI.git runpod-scripts; else git -C runpod-scripts pull --ff-only; fi && bash runpod-scripts/runpod_startup.sh"
 
-
+# Значение для отдельного поля HTTP Ports в шаблоне RunPod:
 7860,8188

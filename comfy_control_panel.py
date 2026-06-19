@@ -23,6 +23,10 @@ DOWNLOADER_SCRIPT = os.path.join(BASE_DIR, "comfy_model_downloader.sh")
 TOKENS_ENV_FILE = os.path.expanduser("~/.config/comfy-model-downloader/tokens.env")
 FILE_MANAGER_ROOT = "/workspace" if os.path.exists("/workspace") else BASE_DIR
 FILE_DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "comfy-control-downloads")
+DEFAULT_COMFY_ARGS = os.environ.get(
+    "COMFY_ARGS",
+    "--listen 0.0.0.0 --port 8188 --highvram",
+)
 
 # Состояние процесса ComfyUI
 comfy_process = None
@@ -131,8 +135,11 @@ def start_comfy(args):
     # Создаем файл логов, если его нет
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     
-    # Парсим аргументы
-    arg_list = args.split()
+    # shlex корректно сохраняет аргументы с пробелами и кавычками.
+    try:
+        arg_list = shlex.split(args or "")
+    except ValueError as exc:
+        return f"Ошибка в аргументах запуска: {exc}"
     
     # Определяем исполняемый файл python (в venv или глобальный)
     venv_python = os.path.join(COMFY_DIR, ".venv", "bin", "python")
@@ -157,6 +164,11 @@ def start_comfy(args):
         log_file_obj.close()
         
         time.sleep(2) # Даем процессу инициализироваться
+        if comfy_process.poll() is not None:
+            with process_lock:
+                return_code = comfy_process.returncode
+                comfy_process = None
+            return f"ComfyUI завершился сразу после запуска (код {return_code}). Проверьте {LOG_FILE}"
         return f"Запущено! Логи пишутся в {LOG_FILE}"
     except Exception as e:
         return f"Ошибка при запуске: {str(e)}"
@@ -1001,7 +1013,7 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                     gr.Markdown("### ⚙️ Параметры запуска")
                     comfy_args = gr.Textbox(
                         label="Аргументы командной строки", 
-                        value="--listen 0.0.0.0 --port 8188 --highvram"
+                        value=DEFAULT_COMFY_ARGS
                     )
                     
                     with gr.Row():
@@ -1345,9 +1357,20 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
     )
 
 if __name__ == "__main__":
+    # На RunPod по умолчанию запускаем ComfyUI вместе с панелью. Отключить можно
+    # переменной AUTO_START_COMFY=0 и затем запускать сервер кнопкой в панели.
+    auto_start = os.environ.get("AUTO_START_COMFY", "1").strip().lower()
+    if auto_start not in {"0", "false", "no", "off"}:
+        print(f"Автозапуск ComfyUI: {start_comfy(DEFAULT_COMFY_ARGS)}", flush=True)
+
     # Запуск Gradio. Порт 7860 по умолчанию.
     # Флаг share=True не рекомендуется запускать без пароля на публичных подах,
     # но bind на 0.0.0.0 позволяет открыть веб-интерфейс через прокси-порт RunPod.
     panel_pass = os.environ.get("PANEL_PASS", "")
     auth = (os.environ.get("PANEL_USER", "admin"), panel_pass) if panel_pass else None
+    if auth is None:
+        print(
+            "ВНИМАНИЕ: PANEL_PASS не задан. Панель с Terminal доступна без пароля!",
+            flush=True,
+        )
     demo.launch(server_name="0.0.0.0", server_port=7860, auth=auth)
