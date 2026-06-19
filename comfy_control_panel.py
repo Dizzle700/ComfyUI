@@ -139,9 +139,8 @@ def start_comfy(args):
     except ValueError as exc:
         return f"Ошибка в аргументах запуска: {exc}"
     
-    # Определяем исполняемый файл python (в venv или глобальный)
-    venv_python = os.path.join(COMFY_DIR, ".venv", "bin", "python")
-    python_exe = venv_python if os.path.exists(venv_python) else "python3"
+    # ComfyUI использует то же готовое Python-окружение RunPod, что и панель.
+    python_exe = sys.executable
 
     try:
         # Запускаем в фоновом режиме, перенаправляя логи в файл

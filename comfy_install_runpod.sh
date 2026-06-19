@@ -49,11 +49,6 @@ done
 COMFY_REPO="https://github.com/Comfy-Org/ComfyUI.git"
 MANAGER_DIR="$COMFY_DIR/custom_nodes/comfyui-manager"
 MANAGER_REPO="https://github.com/Comfy-Org/ComfyUI-Manager.git"
-TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
-TORCH_VERSION="${TORCH_VERSION:-2.8.0}"
-TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.23.0}"
-TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.8.0}"
-TORCH_CUDA_VERSION="${TORCH_CUDA_VERSION:-12.8}"
 
 info() { printf '%b\n' "${BLUE}$*${NC}"; }
 success() { printf '%b\n' "${GREEN}$*${NC}"; }
@@ -74,49 +69,35 @@ else
     warn "Каталог /workspace не найден. Данные могут быть потеряны при остановке пода."
 fi
 
-ensure_venv_pip() {
-    if "$VENV_PYTHON" -m pip --version >/dev/null 2>&1; then
-        success "pip готов к работе: $("$VENV_PYTHON" -m pip --version)"
+ensure_python_pip() {
+    if "$PYTHON_EXE" -m pip --version >/dev/null 2>&1; then
+        success "pip готов к работе: $("$PYTHON_EXE" -m pip --version)"
         return
     fi
 
-    info "pip не найден в .venv. Устанавливаем через ensurepip..."
-    "$VENV_PYTHON" -m ensurepip --upgrade
+    info "pip не найден в Python-окружении RunPod. Устанавливаем через ensurepip..."
+    "$PYTHON_EXE" -m ensurepip --upgrade
 }
 
-write_torch_constraints() {
+write_preinstalled_torch_constraints() {
     TORCH_CONSTRAINTS="$COMFY_DIR/.runpod-torch-constraints.txt"
-    cat > "$TORCH_CONSTRAINTS" <<EOF
-torch==$TORCH_VERSION
-torchvision==$TORCHVISION_VERSION
-torchaudio==$TORCHAUDIO_VERSION
-EOF
+    "$PYTHON_EXE" - <<'PY' > "$TORCH_CONSTRAINTS"
+from importlib.metadata import PackageNotFoundError, version
+
+for package in ("torch", "torchvision", "torchaudio"):
+    try:
+        print(f"{package}=={version(package)}")
+    except PackageNotFoundError:
+        pass
+PY
 }
 
-install_compatible_torch() {
-    warn "Устанавливаем PyTorch $TORCH_VERSION для CUDA $TORCH_CUDA_VERSION ($TORCH_INDEX_URL)..."
-    "$VENV_PYTHON" -m pip install \
-        torch=="$TORCH_VERSION" torchvision=="$TORCHVISION_VERSION" torchaudio=="$TORCHAUDIO_VERSION" \
-        --index-url "$TORCH_INDEX_URL"
-}
-
-torch_matches_target() {
+has_cuda_torch() {
     local python_exe=$1
-    "$python_exe" - "$TORCH_VERSION" "$TORCH_CUDA_VERSION" <<'PY' >/dev/null 2>&1
-import sys
+    "$python_exe" - <<'PY' >/dev/null 2>&1
 import torch
 
-expected_torch = sys.argv[1]
-expected_cuda = sys.argv[2]
-installed_torch = torch.__version__.split("+", 1)[0]
-installed_cuda = str(torch.version.cuda or "")
-
-ok = (
-    torch.cuda.is_available()
-    and installed_torch == expected_torch
-    and installed_cuda == expected_cuda
-)
-raise SystemExit(0 if ok else 1)
+raise SystemExit(0 if torch.version.cuda else 1)
 PY
 }
 
@@ -130,44 +111,31 @@ else
 fi
 
 cd "$COMFY_DIR"
+PYTHON_EXE="${PYTHON_EXE:-python3}"
+export PIP_BREAK_SYSTEM_PACKAGES="${PIP_BREAK_SYSTEM_PACKAGES:-1}"
+ensure_python_pip
 
-# В современных RunPod/PyTorch images системный Python часто externally managed,
-# поэтому зависимости ComfyUI ставим в venv. Если PyTorch уже есть в template,
-# создаем venv с system-site-packages и не скачиваем torch повторно.
-SYSTEM_TORCH_READY=false
-if torch_matches_target python3; then
-    SYSTEM_TORCH_READY=true
-    success "Контейнерный PyTorch подходит: $(python3 -c 'import torch; print(torch.__version__, "(CUDA", torch.version.cuda, ")")')"
-elif python3 -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" >/dev/null 2>&1; then
-    warn "Предустановленный PyTorch не совпадает с целевым стеком $TORCH_VERSION + CUDA $TORCH_CUDA_VERSION."
-fi
-
-if [[ ! -x .venv/bin/python ]]; then
-    if [[ "$SYSTEM_TORCH_READY" == true ]]; then
-        info "Создаем .venv с доступом к контейнерному PyTorch..."
-        python3 -m venv --system-site-packages .venv
-    else
-        info "Создаем изолированное виртуальное окружение .venv..."
-        python3 -m venv .venv
+# Используем готовое Python-окружение RunPod напрямую. Constraints запрещают pip
+# подменять предустановленный Torch другой сборкой.
+if has_cuda_torch "$PYTHON_EXE"; then
+    success "Используем предустановленный PyTorch: $("$PYTHON_EXE" -c 'import torch; print(torch.__version__, "(CUDA", torch.version.cuda, ")")')"
+    if ! "$PYTHON_EXE" -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" >/dev/null 2>&1; then
+        warn "PyTorch собран с CUDA, но GPU сейчас недоступен. Проверьте драйвер и настройки RunPod."
     fi
 else
-    success "Используем существующее окружение: $COMFY_DIR/.venv"
+    error "CUDA-enabled PyTorch в RunPod-образе не найден."
+    error "Выберите PyTorch template; автоматическая загрузка другой сборки отключена."
+    exit 1
 fi
-VENV_PYTHON="$COMFY_DIR/.venv/bin/python"
-ensure_venv_pip
-write_torch_constraints
 
-if torch_matches_target "$VENV_PYTHON"; then
-    success "PyTorch в .venv готов: $("$VENV_PYTHON" -c 'import torch; print(torch.__version__, "(CUDA", torch.version.cuda, ")")')"
-else
-    install_compatible_torch
-fi
+write_preinstalled_torch_constraints
+PIP_TORCH_ARGS=(--constraint "$TORCH_CONSTRAINTS")
+export PIP_CONSTRAINT="$TORCH_CONSTRAINTS"
 
 info "Устанавливаем зависимости ComfyUI..."
-"$VENV_PYTHON" -m pip install \
+"$PYTHON_EXE" -m pip install \
     -r requirements.txt \
-    --constraint "$TORCH_CONSTRAINTS" \
-    --extra-index-url "$TORCH_INDEX_URL"
+    "${PIP_TORCH_ARGS[@]}"
 
 info "Устанавливаем/обновляем ComfyUI-Manager..."
 mkdir -p "$COMFY_DIR/custom_nodes"
@@ -178,14 +146,13 @@ else
 fi
 
 if [[ -f "$MANAGER_DIR/requirements.txt" ]]; then
-    "$VENV_PYTHON" -m pip install \
+    "$PYTHON_EXE" -m pip install \
         -r "$MANAGER_DIR/requirements.txt" \
-        --constraint "$TORCH_CONSTRAINTS" \
-        --extra-index-url "$TORCH_INDEX_URL"
+        "${PIP_TORCH_ARGS[@]}"
 fi
 
 info "Устанавливаем зависимости для Панели Управления (Gradio, psutil)..."
-"$VENV_PYTHON" -m pip install gradio psutil
+"$PYTHON_EXE" -m pip install gradio psutil
 
 # Копирование pisa_sr.pkl, если он лежит в папке со скриптом
 if [[ -f "$SCRIPT_DIR/pisa_sr.pkl" ]]; then
@@ -194,9 +161,9 @@ if [[ -f "$SCRIPT_DIR/pisa_sr.pkl" ]]; then
     cp "$SCRIPT_DIR/pisa_sr.pkl" "$COMFY_DIR/models/loras/pisa_sr.pkl"
 fi
 
-success "Автоматическая установка ComfyUI в .venv завершена!"
+success "Автоматическая установка ComfyUI в Python-окружение RunPod завершена!"
 if [[ "$START_PANEL" == true ]]; then
     info "Запускаем Графическую Панель Управления..."
-    exec "$VENV_PYTHON" "$SCRIPT_DIR/comfy_control_panel.py"
+    exec "$PYTHON_EXE" "$SCRIPT_DIR/comfy_control_panel.py"
 fi
 info "Флаг --no-start указан: панель управления не запускаем."
