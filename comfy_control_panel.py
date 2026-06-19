@@ -7,6 +7,10 @@ import signal
 import time
 import shutil
 import threading
+import tempfile
+import zipfile
+import queue
+import shlex
 import gradio as gr
 import psutil
 
@@ -16,6 +20,8 @@ COMFY_DIR = os.environ.get("COMFY_DIR", "/workspace/ComfyUI" if os.path.exists("
 LOG_FILE = os.path.join(COMFY_DIR, "comfyui.log")
 DOWNLOADER_SCRIPT = os.path.join(BASE_DIR, "comfy_model_downloader.sh")
 TOKENS_ENV_FILE = os.path.expanduser("~/.config/comfy-model-downloader/tokens.env")
+FILE_MANAGER_ROOT = "/workspace" if os.path.exists("/workspace") else BASE_DIR
+FILE_DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "comfy-control-downloads")
 
 # Состояние процесса ComfyUI
 comfy_process = None
@@ -28,7 +34,7 @@ download_lock = threading.Lock()
 def add_download_log(text):
     with download_lock:
         download_logs.append(text)
-        if len(download_logs) > 100:
+        if len(download_logs) > 1000:
             download_logs.pop(0)
 
 def get_download_logs():
@@ -181,6 +187,12 @@ def stop_comfy():
         except:
             pass
         return f"Ошибка при остановке: {str(e)}"
+
+def restart_comfy(args):
+    stop_result = stop_comfy()
+    time.sleep(3)
+    start_result = start_comfy(args)
+    return f"{stop_result}\n{start_result}"
 
 is_installing = False
 install_lock = threading.Lock()
@@ -335,6 +347,23 @@ def install_sparkvsr():
     if not os.path.exists(custom_nodes_dir):
         return "Папка custom_nodes не найдена. Сначала установите ComfyUI."
 
+    def copy_sparkvsr_workflow(source_workflow):
+        if not os.path.exists(source_workflow):
+            add_node_log(f"⚠️ Workflow не найден: {source_workflow}")
+            return
+
+        destinations = [
+            os.path.join(COMFY_DIR, "input", "sparkvsr_all_modes_preview.json"),
+            os.path.join(COMFY_DIR, "user", "default", "workflows", "sparkvsr_all_modes_preview.json"),
+        ]
+        for destination in destinations:
+            try:
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                shutil.copy2(source_workflow, destination)
+                add_node_log(f"Workflow скопирован: {destination}")
+            except Exception as e:
+                add_node_log(f"⚠️ Не удалось скопировать workflow в {destination}: {str(e)}")
+
     def worker():
         add_node_log("=== НАЧАЛО УСТАНОВКИ SparkVSR ===")
         
@@ -358,6 +387,12 @@ def install_sparkvsr():
                 return
         else:
             add_node_log("Репозиторий SparkVSR уже склонирован.")
+
+        # На повторной установке подтягиваем свежие файлы workflow/custom node.
+        try:
+            subprocess.run(["git", "pull", "--ff-only"], cwd=spark_repo_dir, check=True)
+        except Exception as e:
+            add_node_log(f"⚠️ Не удалось обновить SparkVSR через git pull: {str(e)}")
             
         # Создаем симлинк
         if not os.path.exists(spark_plugin_symlink):
@@ -381,6 +416,13 @@ def install_sparkvsr():
                 return
         else:
             add_node_log("VideoHelperSuite уже установлен.")
+
+        source_workflow = os.path.join(
+            spark_plugin_symlink,
+            "example_workflows",
+            "sparkvsr_all_modes_preview.json",
+        )
+        copy_sparkvsr_workflow(source_workflow)
 
         # 3. Установка Python зависимостей
         venv_python = os.path.join(COMFY_DIR, ".venv", "bin", "python")
@@ -462,7 +504,8 @@ def install_sparkvsr():
                 add_node_log(f"Локальный pisa_sr.pkl не найден. Для автоматического скачивания настройте Hugging Face Token во вкладке '📥 Загрузчик моделей', либо скачайте его вручную и положите в {loras_dir}/pisa_sr.pkl")
             
         add_node_log("=== УСТАНОВКА SparkVSR ЗАВЕРШЕНА! ===")
-        add_node_log("Перезапустите ComfyUI через вкладку Управление.")
+        add_node_log("Перезапустите ComfyUI через вкладку Управление. Авто-загрузка workflow работает только после restart и на пустом canvas.")
+        add_node_log("Если workflow не появился автоматически, откройте файл sparkvsr_all_modes_preview.json вручную из /workspace/ComfyUI/input или /workspace/ComfyUI/user/default/workflows.")
 
     threading.Thread(target=worker, daemon=True).start()
     return "Процесс установки SparkVSR и VideoHelperSuite запущен в фоновом режиме. Логи смотрите ниже."
@@ -493,6 +536,16 @@ def save_tokens(hf_token, civitai_token):
     except Exception as e:
         return f"Ошибка сохранения токенов: {str(e)}"
 
+def build_downloader_env():
+    env = os.environ.copy()
+    env["COMFY_DIR"] = COMFY_DIR
+    hf_token, civitai_token = load_tokens()
+    if hf_token:
+        env["HF_TOKEN"] = hf_token
+    if civitai_token:
+        env["CIVITAI_API_TOKEN"] = civitai_token
+    return env, hf_token, civitai_token
+
 # Скачивание моделей
 def run_download_model(url, folder, filename):
     if not url.strip():
@@ -512,8 +565,9 @@ def run_download_model(url, folder, filename):
             cmd += ["--filename", filename.strip()]
         
         # Запуск процесса
-        env = os.environ.copy()
-        env["COMFY_DIR"] = COMFY_DIR
+        env, hf_token, civitai_token = build_downloader_env()
+        add_download_log(f"Hugging Face token: {'настроен' if hf_token else 'не настроен'}")
+        add_download_log(f"Civitai token: {'настроен' if civitai_token else 'не настроен'}")
         
         proc = subprocess.Popen(
             cmd,
@@ -536,6 +590,155 @@ def run_download_model(url, folder, filename):
         
     threading.Thread(target=worker, daemon=True).start()
     return "Загрузка запущена в фоновом режиме. Перейдите к логу ниже для отслеживания."
+
+def get_uploaded_file_path(uploaded_file):
+    if uploaded_file is None:
+        return ""
+    if isinstance(uploaded_file, str):
+        return uploaded_file
+    if hasattr(uploaded_file, "name"):
+        return uploaded_file.name
+    return ""
+
+def parse_batch_download_line(line):
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+
+    fields = shlex.split(line)
+    if not fields:
+        return None
+
+    url = fields[0]
+    folder = ""
+    i = 1
+    while i < len(fields):
+        option = fields[i]
+        if option == "--folder":
+            if i + 1 >= len(fields):
+                raise ValueError("после --folder нужна папка")
+            folder = fields[i + 1]
+            i += 2
+        elif option.startswith("--folder="):
+            folder = option.split("=", 1)[1]
+            i += 1
+        elif option.startswith("--"):
+            folder = option[2:]
+            i += 1
+        else:
+            raise ValueError(f"неизвестный аргумент '{option}'")
+
+    return url, folder
+
+def read_batch_download_entries(list_path):
+    entries = []
+    with open(list_path, "r", encoding="utf-8", errors="ignore") as file:
+        for line_number, line in enumerate(file, start=1):
+            parsed = parse_batch_download_line(line)
+            if parsed is None:
+                continue
+            entries.append((line_number, parsed[0], parsed[1]))
+    return entries
+
+def stream_download_process(cmd, env, log_prefix=""):
+    proc = subprocess.Popen(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    while True:
+        line = proc.stdout.readline()
+        if not line:
+            break
+        clean_line = line.strip()
+        if clean_line:
+            add_download_log(f"{log_prefix}{clean_line}")
+    proc.wait()
+    return proc.returncode
+
+def run_parallel_batch_download(list_path, parallel_count):
+    entries = read_batch_download_entries(list_path)
+    if not entries:
+        add_download_log("В TXT нет ссылок для загрузки.")
+        return
+
+    add_download_log(f"Параллельная загрузка: {len(entries)} моделей, потоков: {parallel_count}")
+    hf_token, civitai_token = load_tokens()
+    add_download_log(f"Hugging Face token: {'настроен' if hf_token else 'не настроен'}")
+    add_download_log(f"Civitai token: {'настроен' if civitai_token else 'не настроен'}")
+
+    tasks = queue.Queue()
+    for entry in entries:
+        tasks.put(entry)
+
+    results = {"ok": 0, "failed": 0}
+    results_lock = threading.Lock()
+
+    def worker(worker_id):
+        env, _, _ = build_downloader_env()
+        while True:
+            try:
+                line_number, url, folder = tasks.get_nowait()
+            except queue.Empty:
+                return
+
+            prefix = f"[W{worker_id} L{line_number}] "
+            add_download_log(f"{prefix}Старт: {url}")
+            cmd = [DOWNLOADER_SCRIPT, "--download", url, "--yes"]
+            if folder:
+                cmd += ["--folder", folder]
+                add_download_log(f"{prefix}Папка: models/{folder}")
+
+            return_code = stream_download_process(cmd, env, prefix)
+            with results_lock:
+                if return_code == 0:
+                    results["ok"] += 1
+                else:
+                    results["failed"] += 1
+            add_download_log(f"{prefix}Завершено с кодом {return_code}")
+            tasks.task_done()
+
+    workers = []
+    for index in range(max(1, parallel_count)):
+        thread = threading.Thread(target=worker, args=(index + 1,), daemon=True)
+        workers.append(thread)
+        thread.start()
+    for thread in workers:
+        thread.join()
+
+    add_download_log(f"Итог параллельной загрузки: успешно {results['ok']}, ошибок {results['failed']}")
+
+def run_download_batch(txt_file, parallel_count):
+    list_path = get_uploaded_file_path(txt_file)
+    if not list_path:
+        return "Пожалуйста, загрузите TXT-файл со списком моделей."
+
+    if not os.path.exists(DOWNLOADER_SCRIPT):
+        return f"Загрузчик не найден: {DOWNLOADER_SCRIPT}"
+
+    def worker():
+        add_download_log(f"--- Старт пакетной загрузки: {time.strftime('%H:%M:%S')} ---")
+        add_download_log(f"TXT: {list_path}")
+        parallel = max(1, int(parallel_count or 1))
+
+        add_download_log("Режим: автоопределение папок; построчные флаги --vae/--loras/--checkpoints/--folder поддерживаются")
+        env, hf_token, civitai_token = build_downloader_env()
+        add_download_log(f"Hugging Face token: {'настроен' if hf_token else 'не настроен'}")
+        add_download_log(f"Civitai token: {'настроен' if civitai_token else 'не настроен'}")
+
+        if parallel == 1:
+            cmd = [DOWNLOADER_SCRIPT, "--batch", list_path]
+            return_code = stream_download_process(cmd, env)
+            add_download_log(f"--- Пакетная загрузка завершена с кодом {return_code} ---")
+        else:
+            run_parallel_batch_download(list_path, parallel)
+            add_download_log("--- Параллельная пакетная загрузка завершена ---")
+
+    threading.Thread(target=worker, daemon=True).start()
+    return "Пакетная загрузка запущена в фоновом режиме. Лог ниже."
 
 # Файловый менеджер
 def list_model_folders():
@@ -575,6 +778,199 @@ def delete_model_file(folder_name, file_name):
             return f"Не удалось удалить файл: {str(e)}", browse_folder(folder_name)
     return "Файл не найден.", browse_folder(folder_name)
 
+# Полный файловый менеджер для Gradio Control Panel.
+def normalize_workspace_path(path):
+    raw_path = (path or "").strip()
+    if raw_path in ("", ".", "/"):
+        return ""
+    if os.path.isabs(raw_path):
+        raw_path = os.path.relpath(raw_path, FILE_MANAGER_ROOT)
+    normalized = os.path.normpath(raw_path)
+    if normalized == ".":
+        return ""
+    if normalized == ".." or normalized.startswith(f"..{os.sep}") or os.path.isabs(normalized):
+        raise ValueError("Путь вне /workspace запрещен.")
+    return normalized
+
+def resolve_workspace_path(path):
+    relative_path = normalize_workspace_path(path)
+    absolute_path = os.path.abspath(os.path.join(FILE_MANAGER_ROOT, relative_path))
+    root_real = os.path.realpath(FILE_MANAGER_ROOT)
+    target_real = os.path.realpath(absolute_path)
+    if target_real != root_real and not target_real.startswith(root_real + os.sep):
+        raise ValueError("Путь вне /workspace запрещен.")
+    return absolute_path, relative_path
+
+def format_file_size(size_bytes):
+    value = float(size_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.2f} {unit}"
+        value /= 1024
+
+def list_workspace_files(path):
+    try:
+        absolute_path, relative_path = resolve_workspace_path(path)
+        if not os.path.isdir(absolute_path):
+            return relative_path, [], "Это не папка."
+
+        rows = []
+        for entry in os.scandir(absolute_path):
+            try:
+                stat = entry.stat(follow_symlinks=False)
+                is_dir = entry.is_dir(follow_symlinks=False)
+                entry_type = "Папка" if is_dir else "Файл"
+                if entry.is_symlink():
+                    entry_type = "Ссылка"
+                size = "-" if is_dir else format_file_size(stat.st_size)
+                modified = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime))
+                rows.append([entry.name, entry_type, size, modified])
+            except OSError as exc:
+                rows.append([entry.name, "Ошибка", str(exc), ""])
+
+        rows.sort(key=lambda row: (row[1] != "Папка", row[0].lower()))
+        display_path = f"/workspace/{relative_path}".rstrip("/")
+        return relative_path, rows, f"Открыто: {display_path or '/workspace'}"
+    except Exception as exc:
+        return path or "", [], f"Ошибка: {exc}"
+
+def workspace_parent(path):
+    try:
+        _, relative_path = resolve_workspace_path(path)
+        return list_workspace_files(os.path.dirname(relative_path) if relative_path else "")
+    except Exception as exc:
+        return path or "", [], f"Ошибка: {exc}"
+
+def workspace_open_selected(path, selected_name):
+    if not selected_name:
+        return list_workspace_files(path)
+    try:
+        _, relative_path = resolve_workspace_path(path)
+        target_path = os.path.join(relative_path, selected_name)
+        absolute_path, normalized = resolve_workspace_path(target_path)
+        if os.path.isdir(absolute_path):
+            return list_workspace_files(normalized)
+        current_path, rows, _ = list_workspace_files(relative_path)
+        return current_path, rows, f"Выбран файл: {selected_name}"
+    except Exception as exc:
+        return path or "", [], f"Ошибка: {exc}"
+
+def select_workspace_entry(table_data, evt: gr.SelectData):
+    row_index = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+    try:
+        return table_data[row_index][0]
+    except Exception:
+        return ""
+
+def make_zip_from_folder(folder_path):
+    os.makedirs(FILE_DOWNLOAD_DIR, exist_ok=True)
+    base_name = os.path.basename(folder_path.rstrip(os.sep)) or "workspace"
+    archive_path = os.path.join(FILE_DOWNLOAD_DIR, f"{base_name}-{int(time.time())}.zip")
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for root, _, files in os.walk(folder_path):
+            for file_name in files:
+                full_path = os.path.join(root, file_name)
+                archive_name = os.path.relpath(full_path, os.path.dirname(folder_path))
+                archive.write(full_path, archive_name)
+    return archive_path
+
+def workspace_download_selected(path, selected_name):
+    if not selected_name:
+        return None, "Не выбран файл или папка."
+    try:
+        _, relative_path = resolve_workspace_path(path)
+        target_path, _ = resolve_workspace_path(os.path.join(relative_path, selected_name))
+        if os.path.isdir(target_path):
+            return make_zip_from_folder(target_path), f"Папка упакована в ZIP: {selected_name}"
+        if os.path.isfile(target_path):
+            return target_path, f"Файл готов к скачиванию: {selected_name}"
+        return None, "Можно скачать только файл или папку."
+    except Exception as exc:
+        return None, f"Ошибка: {exc}"
+
+def normalize_uploaded_files(uploaded_files):
+    if uploaded_files is None:
+        return []
+    if not isinstance(uploaded_files, list):
+        uploaded_files = [uploaded_files]
+    paths = []
+    for item in uploaded_files:
+        if isinstance(item, str):
+            paths.append(item)
+        elif hasattr(item, "name"):
+            paths.append(item.name)
+    return [path for path in paths if path]
+
+def workspace_upload_files(path, uploaded_files):
+    try:
+        destination_dir, relative_path = resolve_workspace_path(path)
+        if not os.path.isdir(destination_dir):
+            return "Текущий путь не является папкой.", list_workspace_files(relative_path)[1]
+        source_paths = normalize_uploaded_files(uploaded_files)
+        if not source_paths:
+            return "Файлы не выбраны.", list_workspace_files(relative_path)[1]
+
+        copied = 0
+        for source_path in source_paths:
+            file_name = os.path.basename(source_path)
+            if file_name:
+                shutil.copy2(source_path, os.path.join(destination_dir, file_name))
+                copied += 1
+        return f"Загружено файлов: {copied}", list_workspace_files(relative_path)[1]
+    except Exception as exc:
+        return f"Ошибка: {exc}", []
+
+def workspace_create_folder(path, folder_name):
+    try:
+        current_dir, relative_path = resolve_workspace_path(path)
+        clean_name = os.path.basename((folder_name or "").strip())
+        if not clean_name or clean_name in (".", ".."):
+            return "Введите имя папки.", list_workspace_files(relative_path)[1]
+        os.makedirs(os.path.join(current_dir, clean_name), exist_ok=True)
+        return f"Папка создана: {clean_name}", list_workspace_files(relative_path)[1]
+    except Exception as exc:
+        return f"Ошибка: {exc}", []
+
+def workspace_delete_selected(path, selected_name):
+    if not selected_name:
+        return "Не выбран файл или папка.", list_workspace_files(path)[1]
+    try:
+        _, relative_path = resolve_workspace_path(path)
+        target_path, _ = resolve_workspace_path(os.path.join(relative_path, selected_name))
+        if os.path.isdir(target_path):
+            shutil.rmtree(target_path)
+        else:
+            os.remove(target_path)
+        return f"Удалено: {selected_name}", list_workspace_files(relative_path)[1]
+    except Exception as exc:
+        return f"Ошибка: {exc}", []
+
+def run_workspace_command(path, command):
+    if not (command or "").strip():
+        return "Введите команду."
+    try:
+        working_dir, _ = resolve_workspace_path(path)
+        if not os.path.isdir(working_dir):
+            return "Рабочая папка не найдена."
+        completed = subprocess.run(
+            command,
+            cwd=working_dir,
+            shell=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=120,
+        )
+        output = completed.stdout or ""
+        if len(output) > 20000:
+            output = output[-20000:]
+        return f"$ {command}\n[exit {completed.returncode}]\n{output}"
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout or ""
+        return f"$ {command}\n[timeout]\n{output}"
+    except Exception as exc:
+        return f"Ошибка: {exc}"
+
 # Создание интерфейса Gradio
 with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(primary_hue="orange", secondary_hue="slate")) as demo:
     gr.Markdown(
@@ -601,6 +997,7 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                     
                     with gr.Row():
                         btn_start = gr.Button("▶️ Запустить", variant="primary")
+                        btn_restart = gr.Button("🔁 Restart", variant="secondary")
                         btn_stop = gr.Button("⏹️ Остановить", variant="stop")
                     
                     with gr.Row():
@@ -655,6 +1052,30 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
             
             btn_download = gr.Button("⬇️ Начать загрузку", variant="primary")
             download_status = gr.Markdown("")
+
+            gr.Markdown("---")
+            gr.Markdown("### Пакетная загрузка из TXT")
+            batch_txt_file = gr.File(
+                label="TXT-файл: URL и опциональный --тип на каждой строке",
+                file_types=[".txt"],
+                type="filepath",
+            )
+            gr.Markdown(
+                """
+                Формат строк: `URL`, `URL --vae`, `URL --loras`, `URL --checkpoints`, `URL --diffusion_models`, `URL --text_encoders`, `URL --clip_vision`, `URL --controlnet`, `URL --upscale_models`, `URL --embeddings`.
+                Без флага папка определяется автоматически.
+                """
+            )
+            with gr.Row():
+                batch_parallel_count = gr.Slider(
+                    minimum=1,
+                    maximum=4,
+                    value=1,
+                    step=1,
+                    label="Параллельных загрузок",
+                )
+                btn_batch_download = gr.Button("⬇️ Скачать список", variant="primary")
+            batch_download_status = gr.Markdown("")
             
             gr.Markdown("### 📋 Прогресс и логи скачивания")
             btn_refresh_dl = gr.Button("🔄 Обновить лог скачивания")
@@ -683,7 +1104,56 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
             btn_delete_file = gr.Button("❌ Удалить выбранный файл", variant="stop")
             file_manager_status = gr.Markdown("")
 
-        # Вкладка 4: Установка кастомных нод
+        # Вкладка 4: Полный файловый менеджер /workspace
+        with gr.TabItem("🗂️ Workspace"):
+            initial_ws_path, initial_ws_rows, initial_ws_status = list_workspace_files("")
+            with gr.Row():
+                workspace_path = gr.Textbox(label="Путь от /workspace", value=initial_ws_path, scale=4)
+                selected_workspace_entry = gr.Textbox(label="Выбрано", interactive=False, scale=2)
+
+            with gr.Row():
+                btn_workspace_root = gr.Button("🏠 /workspace")
+                btn_workspace_up = gr.Button("⬆️ Вверх")
+                btn_workspace_open = gr.Button("📂 Открыть")
+                btn_workspace_refresh = gr.Button("🔄 Обновить")
+
+            workspace_table = gr.Dataframe(
+                headers=["Имя", "Тип", "Размер", "Изменен"],
+                datatype=["str", "str", "str", "str"],
+                value=initial_ws_rows,
+                label="Файлы и папки",
+                interactive=False,
+            )
+            workspace_status = gr.Markdown(initial_ws_status)
+
+            with gr.Row():
+                btn_workspace_download = gr.Button("⬇️ Скачать выбранное", variant="primary")
+                btn_workspace_delete = gr.Button("❌ Удалить выбранное", variant="stop")
+            workspace_download_file = gr.File(label="Готовый файл", interactive=False)
+
+            with gr.Row():
+                workspace_upload = gr.File(
+                    label="Загрузить файлы в текущую папку",
+                    file_count="multiple",
+                    type="filepath",
+                )
+                btn_workspace_upload = gr.Button("⬆️ Загрузить", variant="primary")
+
+            with gr.Row():
+                workspace_new_folder = gr.Textbox(label="Новая папка", placeholder="folder-name")
+                btn_workspace_mkdir = gr.Button("📁 Создать папку")
+
+            gr.Markdown("### Terminal")
+            workspace_command = gr.Textbox(label="Команда", placeholder="ls -lah")
+            btn_workspace_command = gr.Button("▶️ Выполнить", variant="primary")
+            workspace_terminal_output = gr.TextArea(
+                label="Вывод",
+                value="",
+                interactive=False,
+                lines=14,
+            )
+
+        # Вкладка 5: Установка кастомных нод
         with gr.TabItem("🧩 Установка Custom Nodes"):
             gr.Markdown("### Установка расширений (Custom Nodes) по ссылке Git")
             with gr.Row():
@@ -717,6 +1187,7 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
 
     # Привязка логики к кнопкам Dashboard
     btn_start.click(start_comfy, inputs=[comfy_args], outputs=[status_indicator])
+    btn_restart.click(restart_comfy, inputs=[comfy_args], outputs=[status_indicator])
     btn_stop.click(stop_comfy, outputs=[status_indicator])
     btn_install.click(run_installation, outputs=[status_indicator])
     
@@ -737,6 +1208,11 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
         run_download_model, 
         inputs=[model_url, dest_folder, custom_filename], 
         outputs=[download_status]
+    )
+    btn_batch_download.click(
+        run_download_batch,
+        inputs=[batch_txt_file, batch_parallel_count],
+        outputs=[batch_download_status],
     )
     btn_refresh_dl.click(get_download_logs, outputs=[dl_log_output])
 
@@ -765,6 +1241,67 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
         delete_model_file, 
         inputs=[folder_select, selected_file_name], 
         outputs=[file_manager_status, model_files_table]
+    )
+
+    # Полный файловый менеджер /workspace
+    workspace_table.select(
+        select_workspace_entry,
+        inputs=[workspace_table],
+        outputs=[selected_workspace_entry],
+    )
+    workspace_path.submit(
+        list_workspace_files,
+        inputs=[workspace_path],
+        outputs=[workspace_path, workspace_table, workspace_status],
+    )
+    btn_workspace_root.click(
+        lambda: list_workspace_files(""),
+        outputs=[workspace_path, workspace_table, workspace_status],
+    )
+    btn_workspace_up.click(
+        workspace_parent,
+        inputs=[workspace_path],
+        outputs=[workspace_path, workspace_table, workspace_status],
+    )
+    btn_workspace_open.click(
+        workspace_open_selected,
+        inputs=[workspace_path, selected_workspace_entry],
+        outputs=[workspace_path, workspace_table, workspace_status],
+    )
+    btn_workspace_refresh.click(
+        list_workspace_files,
+        inputs=[workspace_path],
+        outputs=[workspace_path, workspace_table, workspace_status],
+    )
+    btn_workspace_download.click(
+        workspace_download_selected,
+        inputs=[workspace_path, selected_workspace_entry],
+        outputs=[workspace_download_file, workspace_status],
+    )
+    btn_workspace_upload.click(
+        workspace_upload_files,
+        inputs=[workspace_path, workspace_upload],
+        outputs=[workspace_status, workspace_table],
+    )
+    btn_workspace_mkdir.click(
+        workspace_create_folder,
+        inputs=[workspace_path, workspace_new_folder],
+        outputs=[workspace_status, workspace_table],
+    )
+    btn_workspace_delete.click(
+        workspace_delete_selected,
+        inputs=[workspace_path, selected_workspace_entry],
+        outputs=[workspace_status, workspace_table],
+    )
+    btn_workspace_command.click(
+        run_workspace_command,
+        inputs=[workspace_path, workspace_command],
+        outputs=[workspace_terminal_output],
+    )
+    workspace_command.submit(
+        run_workspace_command,
+        inputs=[workspace_path, workspace_command],
+        outputs=[workspace_terminal_output],
     )
 
     # Установка кастомных нод

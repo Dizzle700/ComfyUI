@@ -581,6 +581,8 @@ download_model() {
 download_batch() {
     local list_file=${1:-} forced_folder=${2:-}
     local line url line_number=0 total=0 success_count=0 skipped_count=0 failed_count=0 status
+    local line_folder option i
+    local -a fields
 
     if [[ -z "$list_file" ]]; then
         read -r -e -p "Путь к TXT-файлу: " list_file || return 1
@@ -596,6 +598,34 @@ download_batch() {
         line=${line#"${line%%[![:space:]]*}"}
         line=${line%"${line##*[![:space:]]}"}
         [[ -z "$line" || "$line" == \#* ]] && continue
+        fields=()
+        read -r -a fields <<< "$line"
+        [[ ${#fields[@]} -gt 0 ]] || continue
+        line_folder=$forced_folder
+        i=1
+        while (( i < ${#fields[@]} )); do
+            option=${fields[$i]}
+            case "$option" in
+                --folder)
+                    (( i + 1 < ${#fields[@]} )) || { error "Строка $line_number: после --folder нужна папка."; return 1; }
+                    line_folder=${fields[$((i + 1))]}
+                    i=$((i + 2))
+                    ;;
+                --folder=*)
+                    line_folder=${option#--folder=}
+                    i=$((i + 1))
+                    ;;
+                --*)
+                    line_folder=${option#--}
+                    i=$((i + 1))
+                    ;;
+                *)
+                    error "Строка $line_number: неизвестный аргумент '$option'."
+                    return 1
+                    ;;
+            esac
+        done
+        [[ -z "$line_folder" ]] || validate_model_folder "$line_folder" || return 1
         total=$((total + 1))
     done < "$list_file"
     (( total > 0 )) || { error "В файле нет ссылок для загрузки."; return 1; }
@@ -610,10 +640,32 @@ download_batch() {
         line=${line#"${line%%[![:space:]]*}"}
         line=${line%"${line##*[![:space:]]}"}
         [[ -z "$line" || "$line" == \#* ]] && continue
-        url=$line
+        fields=()
+        read -r -a fields <<< "$line"
+        url=${fields[0]}
+        line_folder=$forced_folder
+        i=1
+        while (( i < ${#fields[@]} )); do
+            option=${fields[$i]}
+            case "$option" in
+                --folder)
+                    line_folder=${fields[$((i + 1))]}
+                    i=$((i + 2))
+                    ;;
+                --folder=*)
+                    line_folder=${option#--folder=}
+                    i=$((i + 1))
+                    ;;
+                --*)
+                    line_folder=${option#--}
+                    i=$((i + 1))
+                    ;;
+            esac
+        done
 
         printf '\n%b\n' "${YELLOW}========== Модель $((success_count + skipped_count + failed_count + 1))/$total, строка $line_number ==========${NC}"
-        if download_model "$url" "$forced_folder" true; then
+        [[ -n "$line_folder" ]] && info "Папка из флага: models/$line_folder"
+        if download_model "$url" "$line_folder" true; then
             success_count=$((success_count + 1))
         else
             status=$?
@@ -705,6 +757,14 @@ print_usage() {
   --diffusion_models
 
 TXT: одна прямая ссылка на строку. Пустые строки и строки с # пропускаются.
+В строке можно указать папку:
+  https://huggingface.co/.../model.safetensors
+  https://huggingface.co/.../vae.safetensors --vae
+  https://huggingface.co/.../lora.safetensors --loras
+  https://huggingface.co/.../checkpoint.safetensors --checkpoints
+  https://huggingface.co/.../unet.safetensors --diffusion_models
+  https://huggingface.co/.../clip.safetensors --text_encoders
+  https://huggingface.co/.../model.safetensors --folder checkpoints
 EOF
 }
 
