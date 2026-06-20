@@ -1,2 +1,8 @@
-gradio>=4.0.0,<6.0.0
+gradio>=5.5.0,<6.0.0
 psutil>=5.9.0,<7.0.0
+tiktoken>=0.7.0,<1.0.0
+sentencepiece>=0.2.0,<1.0.0
+protobuf>=4.25.0,<7.0.0
+transformers[sentencepiece]>=4.46.2,<5.0.0
+huggingface-hub>=0.34.0,<1.0.0
+hf_transfer>=0.1.9,<1.0.0

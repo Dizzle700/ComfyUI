@@ -89,6 +89,9 @@ for package in ("torch", "torchvision", "torchaudio"):
         print(f"{package}=={version(package)}")
     except PackageNotFoundError:
         pass
+print("transformers>=4.46.2,<5.0.0")
+print("gradio>=5.5.0,<6.0.0")
+print("huggingface-hub>=0.34.0,<1.0.0")
 PY
 }
 
@@ -151,8 +154,15 @@ if [[ -f "$MANAGER_DIR/requirements.txt" ]]; then
         "${PIP_TORCH_ARGS[@]}"
 fi
 
-info "Устанавливаем зависимости для Панели Управления (Gradio, psutil)..."
-"$PYTHON_EXE" -m pip install gradio psutil
+info "Устанавливаем зависимости панели и совместимый T5/SentencePiece tokenizer..."
+if "$PYTHON_EXE" -m pip show hf-gradio >/dev/null 2>&1; then
+    warn "Удаляем несовместимый пакет hf-gradio из RunPod image..."
+    "$PYTHON_EXE" -m pip uninstall -y hf-gradio
+fi
+"$PYTHON_EXE" -m pip install \
+    "gradio>=5.5.0,<6.0.0" psutil tiktoken sentencepiece protobuf hf_transfer \
+    "transformers[sentencepiece]>=4.46.2,<5.0.0" \
+    "huggingface-hub>=0.34.0,<1.0.0"
 
 # Копирование pisa_sr.pkl, если он лежит в папке со скриптом
 if [[ -f "$SCRIPT_DIR/pisa_sr.pkl" ]]; then

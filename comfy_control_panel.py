@@ -24,6 +24,7 @@ DOWNLOADER_SCRIPT = os.path.join(BASE_DIR, "comfy_model_downloader.sh")
 TOKENS_ENV_FILE = os.path.expanduser("~/.config/comfy-model-downloader/tokens.env")
 FILE_MANAGER_ROOT = "/workspace" if os.path.exists("/workspace") else BASE_DIR
 FILE_DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "comfy-control-downloads")
+os.makedirs(FILE_DOWNLOAD_DIR, exist_ok=True)
 DEFAULT_COMFY_ARGS = os.environ.get(
     "COMFY_ARGS",
     "--listen 0.0.0.0 --port 8188 --highvram",
@@ -901,7 +902,13 @@ def workspace_download_selected(path, selected_name):
         if os.path.isdir(target_path):
             return make_zip_from_folder(target_path), f"Папка упакована в ZIP: {selected_name}"
         if os.path.isfile(target_path):
-            return target_path, f"Файл готов к скачиванию: {selected_name}"
+            os.makedirs(FILE_DOWNLOAD_DIR, exist_ok=True)
+            download_path = os.path.join(
+                FILE_DOWNLOAD_DIR,
+                f"{int(time.time())}-{os.path.basename(target_path)}",
+            )
+            shutil.copy2(target_path, download_path)
+            return download_path, f"Файл готов к скачиванию: {selected_name}"
         return None, "Можно скачать только файл или папку."
     except Exception as exc:
         return None, f"Ошибка: {exc}"
@@ -1370,4 +1377,9 @@ if __name__ == "__main__":
             "ВНИМАНИЕ: PANEL_PASS не задан. Панель с Terminal доступна без пароля!",
             flush=True,
         )
-    demo.launch(server_name="0.0.0.0", server_port=7860, auth=auth)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        auth=auth,
+        allowed_paths=[FILE_DOWNLOAD_DIR],
+    )
