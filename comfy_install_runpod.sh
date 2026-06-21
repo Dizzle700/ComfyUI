@@ -160,7 +160,7 @@ if "$PYTHON_EXE" -m pip show hf-gradio >/dev/null 2>&1; then
     "$PYTHON_EXE" -m pip uninstall -y hf-gradio
 fi
 "$PYTHON_EXE" -m pip install \
-    "gradio>=5.5.0,<6.0.0" psutil tiktoken sentencepiece protobuf hf_transfer \
+    "gradio>=5.5.0,<6.0.0" fastapi uvicorn psutil tiktoken sentencepiece protobuf hf_transfer \
     "transformers[sentencepiece]>=4.46.2,<5.0.0" \
     "huggingface-hub>=0.34.0,<1.0.0"
 

@@ -12,9 +12,12 @@ import zipfile
 import queue
 import shlex
 import sys
+import secrets
 from collections import deque
 import gradio as gr
 import psutil
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request
 
 # Определение путей
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -25,6 +28,10 @@ TOKENS_ENV_FILE = os.path.expanduser("~/.config/comfy-model-downloader/tokens.en
 FILE_MANAGER_ROOT = "/workspace" if os.path.exists("/workspace") else BASE_DIR
 FILE_DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "comfy-control-downloads")
 os.makedirs(FILE_DOWNLOAD_DIR, exist_ok=True)
+CHUNK_UPLOAD_TOKEN = secrets.token_urlsafe(32)
+CHUNK_UPLOAD_MAX_BYTES = 8 * 1024 * 1024
+chunk_upload_sessions = {}
+chunk_upload_lock = threading.Lock()
 DEFAULT_COMFY_ARGS = os.environ.get(
     "COMFY_ARGS",
     "--listen 0.0.0.0 --port 8188 --highvram",
@@ -1116,6 +1123,191 @@ def run_workspace_command(path, command):
     except Exception as exc:
         return f"Ошибка: {exc}"
 
+
+# Отдельный загрузчик передает большие файлы маленькими запросами. Это обходит
+# разрывы соединения RunPod Proxy при обычной multipart-загрузке целого видео.
+panel_app = FastAPI()
+
+
+def verify_chunk_upload_token(request):
+    if request.headers.get("x-upload-token") != CHUNK_UPLOAD_TOKEN:
+        raise HTTPException(status_code=403, detail="Недействительный токен загрузки")
+
+
+def cleanup_stale_chunk_uploads():
+    cutoff = time.time() - 24 * 60 * 60
+    with chunk_upload_lock:
+        stale_ids = [
+            upload_id
+            for upload_id, session in chunk_upload_sessions.items()
+            if session["created"] < cutoff
+        ]
+        for upload_id in stale_ids:
+            session = chunk_upload_sessions.pop(upload_id)
+            try:
+                os.remove(session["part_path"])
+            except FileNotFoundError:
+                pass
+
+
+@panel_app.post("/chunk-upload/start")
+async def chunk_upload_start(request: Request):
+    verify_chunk_upload_token(request)
+    cleanup_stale_chunk_uploads()
+    payload = await request.json()
+    file_name = os.path.basename(str(payload.get("name", "")).strip())
+    destination = str(payload.get("destination", "ComfyUI/input")).strip()
+    try:
+        expected_size = int(payload.get("size", 0))
+    except (TypeError, ValueError):
+        expected_size = 0
+    if not file_name or file_name in (".", ".."):
+        raise HTTPException(status_code=400, detail="Некорректное имя файла")
+    if expected_size <= 0:
+        raise HTTPException(status_code=400, detail="Файл пуст или размер неизвестен")
+
+    try:
+        destination_dir, relative_path = resolve_workspace_path(destination)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not os.path.isdir(destination_dir):
+        raise HTTPException(status_code=400, detail="Папка назначения не существует")
+    if shutil.disk_usage(destination_dir).free < expected_size:
+        raise HTTPException(status_code=507, detail="Недостаточно свободного места")
+
+    upload_id = secrets.token_hex(16)
+    part_path = os.path.join(destination_dir, f".upload-{upload_id}.part")
+    target_path = os.path.join(destination_dir, file_name)
+    with open(part_path, "wb"):
+        pass
+    with chunk_upload_lock:
+        chunk_upload_sessions[upload_id] = {
+            "created": time.time(),
+            "expected_size": expected_size,
+            "received": 0,
+            "next_index": 0,
+            "part_path": part_path,
+            "target_path": target_path,
+        }
+    return {"upload_id": upload_id, "destination": relative_path, "name": file_name}
+
+
+@panel_app.post("/chunk-upload/chunk/{upload_id}/{index}")
+async def chunk_upload_chunk(upload_id: str, index: int, request: Request):
+    verify_chunk_upload_token(request)
+    chunk = await request.body()
+    if not chunk or len(chunk) > CHUNK_UPLOAD_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Некорректный размер части")
+
+    with chunk_upload_lock:
+        session = chunk_upload_sessions.get(upload_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Сессия загрузки не найдена")
+        # Повтор уже принятой части возможен, если прокси потерял только ответ.
+        if index < session["next_index"]:
+            return {"received": session["received"], "already_received": True}
+        if index != session["next_index"]:
+            raise HTTPException(status_code=409, detail="Нарушен порядок частей")
+        if session["received"] + len(chunk) > session["expected_size"]:
+            raise HTTPException(status_code=400, detail="Получено больше данных, чем ожидалось")
+        with open(session["part_path"], "ab") as output:
+            output.write(chunk)
+            output.flush()
+        session["received"] += len(chunk)
+        session["next_index"] += 1
+        received = session["received"]
+    return {"received": received}
+
+
+@panel_app.post("/chunk-upload/finish/{upload_id}")
+async def chunk_upload_finish(upload_id: str, request: Request):
+    verify_chunk_upload_token(request)
+    with chunk_upload_lock:
+        session = chunk_upload_sessions.get(upload_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Сессия загрузки не найдена")
+        if session["received"] != session["expected_size"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Получено {session['received']} из {session['expected_size']} байт",
+            )
+        os.replace(session["part_path"], session["target_path"])
+        target_path = session["target_path"]
+        chunk_upload_sessions.pop(upload_id, None)
+    return {"ok": True, "path": target_path}
+
+
+CHUNK_UPLOADER_JS = f"""
+() => {{
+  const init = () => {{
+    const button = document.getElementById('chunk-upload-button');
+    const picker = document.getElementById('chunk-upload-files');
+    const destination = document.getElementById('chunk-upload-destination');
+    const status = document.getElementById('chunk-upload-status');
+    if (!button || !picker || !destination || !status || button.dataset.ready) return;
+    button.dataset.ready = '1';
+    const token = {CHUNK_UPLOAD_TOKEN!r};
+    const chunkSize = 4 * 1024 * 1024;
+    const request = async (url, options, retries = 5) => {{
+      let lastError;
+      for (let attempt = 0; attempt < retries; attempt++) {{
+        try {{
+          const response = await fetch(url, options);
+          if (!response.ok) {{
+            let message = `HTTP ${{response.status}}`;
+            try {{ message = (await response.json()).detail || message; }} catch (_) {{}}
+            throw new Error(message);
+          }}
+          return await response.json();
+        }} catch (error) {{
+          lastError = error;
+          if (attempt + 1 < retries) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+        }}
+      }}
+      throw lastError;
+    }};
+    button.addEventListener('click', async () => {{
+      if (!picker.files.length) {{ status.textContent = 'Выберите файл.'; return; }}
+      button.disabled = true;
+      try {{
+        for (const file of picker.files) {{
+          status.textContent = `Подготовка: ${{file.name}}`;
+          const headers = {{'Content-Type': 'application/json', 'X-Upload-Token': token}};
+          const started = await request('/chunk-upload/start', {{
+            method: 'POST', headers,
+            body: JSON.stringify({{name: file.name, size: file.size, destination: destination.value}})
+          }});
+          const total = Math.ceil(file.size / chunkSize);
+          for (let index = 0; index < total; index++) {{
+            const begin = index * chunkSize;
+            const chunk = file.slice(begin, Math.min(begin + chunkSize, file.size));
+            await request(`/chunk-upload/chunk/${{started.upload_id}}/${{index}}`, {{
+              method: 'POST',
+              headers: {{'Content-Type': 'application/octet-stream', 'X-Upload-Token': token}},
+              body: chunk
+            }});
+            const percent = Math.round(Math.min(begin + chunk.size, file.size) / file.size * 100);
+            status.textContent = `${{file.name}}: ${{percent}}% (${{index + 1}}/${{total}} частей)`;
+          }}
+          const finished = await request(`/chunk-upload/finish/${{started.upload_id}}`, {{
+            method: 'POST', headers: {{'X-Upload-Token': token}}
+          }});
+          status.textContent = `Готово: ${{finished.path}}`;
+        }}
+        picker.value = '';
+      }} catch (error) {{
+        status.textContent = `Ошибка загрузки: ${{error.message}}`;
+      }} finally {{
+        button.disabled = false;
+      }}
+    }});
+  }};
+  setTimeout(init, 300);
+  setTimeout(init, 1500);
+  new MutationObserver(init).observe(document.body, {{childList: true, subtree: true}});
+}}
+"""
+
 # Создание интерфейса Gradio
 with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(primary_hue="orange", secondary_hue="slate")) as demo:
     gr.Markdown(
@@ -1297,6 +1489,20 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                     type="filepath",
                 )
                 btn_workspace_upload = gr.Button("⬆️ Загрузить", variant="primary")
+
+            gr.Markdown("### 🚚 Надежная загрузка больших файлов")
+            gr.HTML(
+                """
+                <div style="padding:12px;border:1px solid var(--border-color-primary);border-radius:8px">
+                  <label>Папка назначения от /workspace</label>
+                  <input id="chunk-upload-destination" value="ComfyUI/input"
+                         style="display:block;width:100%;margin:6px 0 10px;padding:8px" />
+                  <input id="chunk-upload-files" type="file" multiple style="display:block;margin-bottom:10px" />
+                  <button id="chunk-upload-button" class="lg primary svelte-cmf5ev">⬆️ Загрузить частями</button>
+                  <div id="chunk-upload-status" style="margin-top:10px">Файл будет передаваться частями по 4 MB.</div>
+                </div>
+                """
+            )
 
             with gr.Row():
                 workspace_new_folder = gr.Textbox(label="Новая папка", placeholder="folder-name")
@@ -1491,6 +1697,7 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
         inputs=[lines_slider], 
         outputs=[status_indicator, pid_indicator, system_stats_box, log_output]
     )
+    demo.load(fn=None, js=CHUNK_UPLOADER_JS)
 
 if __name__ == "__main__":
     # На RunPod по умолчанию запускаем ComfyUI вместе с панелью. Отключить можно
@@ -1509,9 +1716,11 @@ if __name__ == "__main__":
             "ВНИМАНИЕ: PANEL_PASS не задан. Панель с Terminal доступна без пароля!",
             flush=True,
         )
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
+    mounted_app = gr.mount_gradio_app(
+        panel_app,
+        demo,
+        path="/",
         auth=auth,
         allowed_paths=[FILE_DOWNLOAD_DIR],
     )
+    uvicorn.run(mounted_app, host="0.0.0.0", port=7860)
