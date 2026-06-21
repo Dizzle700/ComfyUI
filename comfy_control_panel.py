@@ -279,7 +279,7 @@ def read_logs(num_lines=50):
         return f"Не удалось прочитать логи: {str(e)}"
 
 # Установка кастомных нод
-node_logs = deque(maxlen=100)
+node_logs = deque(maxlen=1000)
 node_lock = threading.Lock()
 
 def add_node_log(text):
@@ -289,6 +289,25 @@ def add_node_log(text):
 def get_node_logs():
     with node_lock:
         return "\n".join(node_logs)
+
+def run_node_command(cmd, cwd=None):
+    """Run an installer command and mirror combined output to the node log."""
+    add_node_log(f"$ {shlex.join(cmd)}")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    if proc.stdout is not None:
+        for line in proc.stdout:
+            clean_line = line.rstrip()
+            if clean_line:
+                add_node_log(clean_line)
+    proc.wait()
+    return proc.returncode
 
 def install_custom_node(repo_url):
     if not repo_url.strip():
@@ -516,6 +535,76 @@ def install_sparkvsr():
 
     threading.Thread(target=worker, daemon=True).start()
     return "Процесс установки SparkVSR и VideoHelperSuite запущен в фоновом режиме. Логи смотрите ниже."
+
+def install_seedvr2():
+    custom_nodes_dir = os.path.join(COMFY_DIR, "custom_nodes")
+    if not os.path.isdir(custom_nodes_dir):
+        return "Папка custom_nodes не найдена. Сначала установите ComfyUI."
+
+    repo_url = "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git"
+    candidate_dirs = [
+        os.path.join(custom_nodes_dir, "seedvr2_videoupscaler"),
+        os.path.join(custom_nodes_dir, "ComfyUI-SeedVR2_VideoUpscaler"),
+    ]
+
+    def copy_example_workflows(node_dir):
+        source_dir = os.path.join(node_dir, "example_workflows")
+        if not os.path.isdir(source_dir):
+            add_node_log("Примеры workflow в репозитории не найдены.")
+            return
+
+        destination_dir = os.path.join(COMFY_DIR, "user", "default", "workflows", "SeedVR2")
+        os.makedirs(destination_dir, exist_ok=True)
+        copied = 0
+        for file_name in os.listdir(source_dir):
+            source_path = os.path.join(source_dir, file_name)
+            if os.path.isfile(source_path) and file_name.lower().endswith(".json"):
+                shutil.copy2(source_path, os.path.join(destination_dir, file_name))
+                copied += 1
+        add_node_log(f"Workflow SeedVR2 скопировано: {copied} -> {destination_dir}")
+
+    def worker():
+        add_node_log(f"=== УСТАНОВКА SEEDVR2: {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
+        try:
+            existing_dir = next((path for path in candidate_dirs if os.path.exists(path)), None)
+            node_dir = existing_dir or candidate_dirs[0]
+
+            if existing_dir:
+                if not os.path.isdir(os.path.join(node_dir, ".git")):
+                    add_node_log(f"⚠️ Путь существует, но не является Git-репозиторием: {node_dir}")
+                    return
+                add_node_log(f"SeedVR2 уже установлен. Обновляем: {node_dir}")
+                if run_node_command(["git", "pull", "--ff-only"], cwd=node_dir) != 0:
+                    add_node_log("⚠️ Не удалось обновить SeedVR2.")
+                    return
+            else:
+                add_node_log(f"Клонируем SeedVR2 в {node_dir}...")
+                if run_node_command(["git", "clone", "--depth", "1", repo_url, node_dir]) != 0:
+                    add_node_log("⚠️ Не удалось клонировать SeedVR2.")
+                    return
+
+            requirements_path = os.path.join(node_dir, "requirements.txt")
+            if not os.path.isfile(requirements_path):
+                add_node_log(f"⚠️ requirements.txt не найден: {requirements_path}")
+                return
+
+            add_node_log("Устанавливаем зависимости SeedVR2 в окружение ComfyUI...")
+            if run_node_command(build_pip_cmd("-r", requirements_path)) != 0:
+                add_node_log("⚠️ Установка Python-зависимостей SeedVR2 завершилась с ошибкой.")
+                return
+
+            models_dir = os.path.join(COMFY_DIR, "models", "SEEDVR2")
+            os.makedirs(models_dir, exist_ok=True)
+            copy_example_workflows(node_dir)
+
+            add_node_log("=== SEEDVR2 УСПЕШНО УСТАНОВЛЕН ===")
+            add_node_log(f"Модели будут автоматически загружены при первом запуске в {models_dir}")
+            add_node_log("Перезапустите ComfyUI во вкладке «Управление и мониторинг».")
+        except Exception as exc:
+            add_node_log(f"⚠️ Ошибка установки SeedVR2: {exc}")
+
+    threading.Thread(target=worker, daemon=True).start()
+    return "Установка/обновление SeedVR2 запущена. Следите за логом ниже."
 
 # Управление токенами
 def load_tokens():
@@ -862,12 +951,43 @@ def workspace_open_selected(path, selected_name):
     except Exception as exc:
         return path or "", [], f"Ошибка: {exc}"
 
+def table_cell_value(table_data, row_index, column_index=0):
+    """Read a Dataframe cell for both Gradio array and pandas payloads."""
+    try:
+        if hasattr(table_data, "iloc"):
+            value = table_data.iloc[row_index, column_index]
+        elif isinstance(table_data, dict) and "data" in table_data:
+            value = table_data["data"][row_index][column_index]
+        else:
+            value = table_data[row_index][column_index]
+        return "" if value is None else str(value)
+    except (IndexError, KeyError, TypeError, AttributeError):
+        return ""
+
 def select_workspace_entry(table_data, evt: gr.SelectData):
     row_index = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
-    try:
-        return table_data[row_index][0]
-    except Exception:
-        return ""
+    selected_name = table_cell_value(table_data, row_index)
+    if selected_name:
+        return selected_name, f"Выбрано: **{selected_name}**. Для входа в папку нажмите «📂 Открыть»."
+    return "", "Не удалось определить выбранную строку. Обновите список и попробуйте снова."
+
+def workspace_root_view():
+    path, rows, status = list_workspace_files("")
+    return path, rows, status, ""
+
+def workspace_path_view(path):
+    current_path, rows, status = list_workspace_files(path)
+    return current_path, rows, status, ""
+
+def workspace_parent_view(path):
+    current_path, rows, status = workspace_parent(path)
+    return current_path, rows, status, ""
+
+def workspace_open_view(path, selected_name):
+    previous_path = normalize_workspace_path(path)
+    current_path, rows, status = workspace_open_selected(path, selected_name)
+    selection = "" if current_path != previous_path else selected_name
+    return current_path, rows, status, selection
 
 def make_zip_from_folder(folder_path):
     os.makedirs(FILE_DOWNLOAD_DIR, exist_ok=True)
@@ -889,7 +1009,7 @@ def download_comfy_output_folder():
     if not has_files:
         return None, f"Папка результатов пуста: {output_dir}"
     try:
-        return make_zip_from_folder(output_dir), "Папка output упакована в ZIP."
+        return make_zip_from_folder(output_dir), "ZIP создан. Нажмите кнопку «Скачать готовый ZIP»."
     except Exception as exc:
         return None, f"Ошибка упаковки output: {exc}"
 
@@ -958,7 +1078,7 @@ def workspace_create_folder(path, folder_name):
 
 def workspace_delete_selected(path, selected_name):
     if not selected_name:
-        return "Не выбран файл или папка.", list_workspace_files(path)[1]
+        return "Не выбран файл или папка.", list_workspace_files(path)[1], ""
     try:
         _, relative_path = resolve_workspace_path(path)
         target_path, _ = resolve_workspace_path(os.path.join(relative_path, selected_name))
@@ -966,9 +1086,9 @@ def workspace_delete_selected(path, selected_name):
             shutil.rmtree(target_path)
         else:
             os.remove(target_path)
-        return f"Удалено: {selected_name}", list_workspace_files(relative_path)[1]
+        return f"Удалено: {selected_name}", list_workspace_files(relative_path)[1], ""
     except Exception as exc:
-        return f"Ошибка: {exc}", []
+        return f"Ошибка: {exc}", [], selected_name
 
 def run_workspace_command(path, command):
     if not (command or "").strip():
@@ -1029,8 +1149,12 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                         btn_install = gr.Button("🚀 Установить ComfyUI с нуля", variant="secondary")
                         btn_refresh = gr.Button("🔄 Обновить статус")
 
-                    btn_download_output = gr.Button("⬇️ Скачать output ZIP", variant="secondary")
-                    output_download_file = gr.File(label="Output ZIP", interactive=False)
+                    btn_download_output = gr.Button("📦 1. Создать output ZIP", variant="secondary")
+                    output_download_file = gr.DownloadButton(
+                        label="⬇️ 2. Скачать готовый ZIP",
+                        value=None,
+                        variant="primary",
+                    )
                     output_download_status = gr.Markdown("")
                     
                 with gr.Column(scale=2):
@@ -1126,7 +1250,8 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                 headers=["Имя файла", "Размер"],
                 datatype=["str", "str"],
                 label="Файлы в выбранной категории",
-                interactive=False
+                interactive=False,
+                type="array",
             )
             
             selected_file_name = gr.Textbox(label="Выбранный файл", interactive=False)
@@ -1152,13 +1277,18 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                 value=initial_ws_rows,
                 label="Файлы и папки",
                 interactive=False,
+                type="array",
             )
             workspace_status = gr.Markdown(initial_ws_status)
 
             with gr.Row():
                 btn_workspace_download = gr.Button("⬇️ Скачать выбранное", variant="primary")
                 btn_workspace_delete = gr.Button("❌ Удалить выбранное", variant="stop")
-            workspace_download_file = gr.File(label="Готовый файл", interactive=False)
+            workspace_download_file = gr.DownloadButton(
+                label="⬇️ Скачать готовый файл",
+                value=None,
+                variant="primary",
+            )
 
             with gr.Row():
                 workspace_upload = gr.File(
@@ -1196,6 +1326,7 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
             gr.Markdown("### ✨ Предустановки популярных расширений")
             with gr.Row():
                 btn_install_sparkvsr = gr.Button("🔥 Установить SparkVSR + VideoHelperSuite (Upscaler)", variant="secondary")
+                btn_install_seedvr2 = gr.Button("🌱 Установить / обновить SeedVR2 Video Upscaler", variant="secondary")
             
             node_install_status = gr.Markdown("")
             
@@ -1267,10 +1398,7 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
     # Выбор строки в таблице
     def select_file_from_table(table_data, evt: gr.SelectData):
         row_index = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
-        try:
-            return table_data[row_index][0]
-        except Exception:
-            return ""
+        return table_cell_value(table_data, row_index)
         
     model_files_table.select(select_file_from_table, inputs=[model_files_table], outputs=[selected_file_name])
     
@@ -1284,31 +1412,31 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
     workspace_table.select(
         select_workspace_entry,
         inputs=[workspace_table],
-        outputs=[selected_workspace_entry],
+        outputs=[selected_workspace_entry, workspace_status],
     )
     workspace_path.submit(
-        list_workspace_files,
+        workspace_path_view,
         inputs=[workspace_path],
-        outputs=[workspace_path, workspace_table, workspace_status],
+        outputs=[workspace_path, workspace_table, workspace_status, selected_workspace_entry],
     )
     btn_workspace_root.click(
-        lambda: list_workspace_files(""),
-        outputs=[workspace_path, workspace_table, workspace_status],
+        workspace_root_view,
+        outputs=[workspace_path, workspace_table, workspace_status, selected_workspace_entry],
     )
     btn_workspace_up.click(
-        workspace_parent,
+        workspace_parent_view,
         inputs=[workspace_path],
-        outputs=[workspace_path, workspace_table, workspace_status],
+        outputs=[workspace_path, workspace_table, workspace_status, selected_workspace_entry],
     )
     btn_workspace_open.click(
-        workspace_open_selected,
+        workspace_open_view,
         inputs=[workspace_path, selected_workspace_entry],
-        outputs=[workspace_path, workspace_table, workspace_status],
+        outputs=[workspace_path, workspace_table, workspace_status, selected_workspace_entry],
     )
     btn_workspace_refresh.click(
-        list_workspace_files,
+        workspace_path_view,
         inputs=[workspace_path],
-        outputs=[workspace_path, workspace_table, workspace_status],
+        outputs=[workspace_path, workspace_table, workspace_status, selected_workspace_entry],
     )
     btn_workspace_download.click(
         workspace_download_selected,
@@ -1328,7 +1456,7 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
     btn_workspace_delete.click(
         workspace_delete_selected,
         inputs=[workspace_path, selected_workspace_entry],
-        outputs=[workspace_status, workspace_table],
+        outputs=[workspace_status, workspace_table, selected_workspace_entry],
     )
     btn_workspace_command.click(
         run_workspace_command,
@@ -1349,6 +1477,10 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
     )
     btn_install_sparkvsr.click(
         install_sparkvsr,
+        outputs=[node_install_status]
+    )
+    btn_install_seedvr2.click(
+        install_seedvr2,
         outputs=[node_install_status]
     )
     btn_refresh_node_log.click(get_node_logs, outputs=[node_log_output])
