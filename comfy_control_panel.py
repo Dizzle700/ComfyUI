@@ -7,7 +7,6 @@ import signal
 import time
 import shutil
 import threading
-import tempfile
 import zipfile
 import queue
 import shlex
@@ -64,10 +63,15 @@ load_secret_environment()
 
 COMFY_DIR = os.environ.get("COMFY_DIR", "/workspace/ComfyUI" if os.path.exists("/workspace") else os.path.join(BASE_DIR, "ComfyUI"))
 LOG_FILE = os.path.join(COMFY_DIR, "comfyui.log")
+OUTPUT_DIR = os.path.join(COMFY_DIR, "output")
 DOWNLOADER_SCRIPT = os.path.join(BASE_DIR, "comfy_model_downloader.sh")
 FILE_MANAGER_ROOT = "/workspace" if os.path.exists("/workspace") else BASE_DIR
-FILE_DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "comfy-control-downloads")
+FILE_DOWNLOAD_DIR = os.environ.get(
+    "COMFY_DOWNLOAD_DIR",
+    os.path.join(FILE_MANAGER_ROOT, ".comfy-control-downloads"),
+)
 os.makedirs(FILE_DOWNLOAD_DIR, exist_ok=True)
+os.chmod(FILE_DOWNLOAD_DIR, 0o700)
 CHUNK_UPLOAD_TOKEN = secrets.token_urlsafe(32)
 CHUNK_UPLOAD_MAX_BYTES = 8 * 1024 * 1024
 chunk_upload_sessions = {}
@@ -89,6 +93,14 @@ install_lock = threading.Lock()
 download_logs = deque(maxlen=1000)
 download_lock = threading.Lock()
 download_job_lock = threading.Lock()
+
+# Фоновые задачи подготовки файлов для скачивания.
+archive_job_lock = threading.Lock()
+archive_jobs = {
+    "output": {"state": "idle", "path": None, "message": "", "started": 0.0},
+    "output_single": {"state": "idle", "path": None, "message": "", "started": 0.0},
+    "workspace": {"state": "idle", "path": None, "message": "", "started": 0.0},
+}
 
 def add_download_log(text):
     with download_lock:
@@ -1063,29 +1075,200 @@ def workspace_open_view(path, selected_name):
     selection = "" if current_path != previous_path else selected_name
     return current_path, rows, status, selection
 
-def make_zip_from_folder(folder_path):
-    os.makedirs(FILE_DOWNLOAD_DIR, exist_ok=True)
+STORED_ZIP_EXTENSIONS = {
+    ".7z", ".avi", ".bz2", ".ckpt", ".flac", ".gif", ".gz", ".jpeg",
+    ".jpg", ".m4a", ".mkv", ".mov", ".mp3", ".mp4", ".ogg", ".png",
+    ".rar", ".safetensors", ".tar", ".webm", ".webp", ".xz", ".zip",
+}
+
+
+def cleanup_old_download_artifacts():
+    """Remove completed artifacts from previous sessions after a configurable TTL."""
+    try:
+        ttl_hours = max(1, int(os.environ.get("COMFY_DOWNLOAD_TTL_HOURS", "24")))
+    except ValueError:
+        ttl_hours = 24
+    cutoff = time.time() - ttl_hours * 3600
+    try:
+        for entry in os.scandir(FILE_DOWNLOAD_DIR):
+            try:
+                if entry.is_file(follow_symlinks=False) and entry.stat().st_mtime < cutoff:
+                    os.remove(entry.path)
+            except (FileNotFoundError, OSError):
+                continue
+    except OSError:
+        pass
+
+
+cleanup_old_download_artifacts()
+
+
+def update_archive_job(job_name, message):
+    with archive_job_lock:
+        archive_jobs[job_name]["message"] = message
+
+
+def format_elapsed_time(seconds):
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}ч {minutes:02d}м {seconds:02d}с"
+    if minutes:
+        return f"{minutes}м {seconds:02d}с"
+    return f"{seconds}с"
+
+
+def get_archive_job_result(job_name):
+    with archive_job_lock:
+        job = dict(archive_jobs[job_name])
+    if job["state"] == "ready" and job["path"] and os.path.isfile(job["path"]):
+        return job["path"], job["message"]
+    if job["state"] == "running":
+        elapsed = format_elapsed_time(time.time() - job["started"])
+        return None, f"{job['message']} Прошло: {elapsed}."
+    return None, job["message"]
+
+
+def start_archive_job(job_name, initial_message, worker):
+    with archive_job_lock:
+        if any(job["state"] == "running" for job in archive_jobs.values()):
+            return None, "Другая подготовка файла уже выполняется. Дождитесь завершения."
+        archive_jobs[job_name] = {
+            "state": "running",
+            "path": None,
+            "message": initial_message,
+            "started": time.time(),
+        }
+
+    def run_worker():
+        try:
+            result_path, ready_message = worker(
+                lambda message: update_archive_job(job_name, message)
+            )
+            with archive_job_lock:
+                archive_jobs[job_name].update(
+                    state="ready", path=result_path, message=ready_message
+                )
+        except Exception as exc:
+            with archive_job_lock:
+                archive_jobs[job_name].update(
+                    state="error", path=None, message=f"Ошибка подготовки: {exc}"
+                )
+
+    threading.Thread(target=run_worker, daemon=True).start()
+    return None, initial_message
+
+
+def make_download_path(base_name, suffix=""):
+    safe_name = os.path.basename(base_name) or "download"
+    unique = f"{int(time.time())}-{secrets.token_hex(4)}"
+    return os.path.join(FILE_DOWNLOAD_DIR, f"{safe_name}-{unique}{suffix}")
+
+
+def make_zip_from_folder(folder_path, progress):
+    files = []
+    total_size = 0
+    folder_parent = os.path.dirname(folder_path.rstrip(os.sep))
+    for root, _, names in os.walk(folder_path):
+        for file_name in names:
+            full_path = os.path.join(root, file_name)
+            if os.path.islink(full_path) or not os.path.isfile(full_path):
+                continue
+            size = os.path.getsize(full_path)
+            files.append((full_path, os.path.relpath(full_path, folder_parent), size))
+            total_size += size
+    if not files:
+        raise ValueError("Папка не содержит файлов")
+
     base_name = os.path.basename(folder_path.rstrip(os.sep)) or "workspace"
-    archive_path = os.path.join(FILE_DOWNLOAD_DIR, f"{base_name}-{int(time.time())}.zip")
-    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
-        for root, _, files in os.walk(folder_path):
-            for file_name in files:
-                full_path = os.path.join(root, file_name)
-                archive_name = os.path.relpath(full_path, os.path.dirname(folder_path))
-                archive.write(full_path, archive_name)
+    archive_path = make_download_path(base_name, ".zip")
+    partial_path = f"{archive_path}.part"
+    processed = 0
+    last_update = 0.0
+    progress(f"Подготовка ZIP: {len(files)} файлов, {format_file_size(total_size)}.")
+    try:
+        with zipfile.ZipFile(
+            partial_path,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=1,
+            allowZip64=True,
+        ) as archive:
+            for full_path, archive_name, file_size in files:
+                info = zipfile.ZipInfo.from_file(full_path, arcname=archive_name)
+                extension = os.path.splitext(full_path)[1].lower()
+                info.compress_type = (
+                    zipfile.ZIP_STORED
+                    if extension in STORED_ZIP_EXTENSIONS
+                    else zipfile.ZIP_DEFLATED
+                )
+                with open(full_path, "rb") as source, archive.open(
+                    info, "w", force_zip64=True
+                ) as destination:
+                    while True:
+                        chunk = source.read(8 * 1024 * 1024)
+                        if not chunk:
+                            break
+                        destination.write(chunk)
+                        processed += len(chunk)
+                        now = time.monotonic()
+                        if now - last_update >= 1:
+                            percent = processed / total_size * 100 if total_size else 100
+                            progress(
+                                f"ZIP: {percent:.1f}% "
+                                f"({format_file_size(processed)} / {format_file_size(total_size)})."
+                            )
+                            last_update = now
+        os.replace(partial_path, archive_path)
+    except Exception:
+        try:
+            os.remove(partial_path)
+        except FileNotFoundError:
+            pass
+        raise
     return archive_path
 
-def download_comfy_output_folder():
-    output_dir = os.path.join(COMFY_DIR, "output")
-    if not os.path.isdir(output_dir):
-        return None, f"Папка результатов не найдена: {output_dir}"
-    has_files = any(files for _, _, files in os.walk(output_dir))
-    if not has_files:
-        return None, f"Папка результатов пуста: {output_dir}"
+
+def prepare_single_file(source_path, progress):
+    destination = make_download_path(os.path.basename(source_path))
+    partial_path = f"{destination}.part"
+    file_size = os.path.getsize(source_path)
+    progress(f"Подготовка файла: {format_file_size(file_size)}.")
     try:
-        return make_zip_from_folder(output_dir), "ZIP создан. Нажмите кнопку «Скачать готовый ZIP»."
-    except Exception as exc:
-        return None, f"Ошибка упаковки output: {exc}"
+        os.link(source_path, partial_path)
+    except OSError:
+        copied = 0
+        last_update = 0.0
+        with open(source_path, "rb") as source, open(partial_path, "wb") as output:
+            while True:
+                chunk = source.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+                copied += len(chunk)
+                now = time.monotonic()
+                if now - last_update >= 1:
+                    percent = copied / file_size * 100 if file_size else 100
+                    progress(f"Копирование: {percent:.1f}%.")
+                    last_update = now
+        shutil.copystat(source_path, partial_path)
+    os.replace(partial_path, destination)
+    return destination
+
+
+def download_comfy_output_folder():
+    if not os.path.isdir(OUTPUT_DIR):
+        return None, f"Папка результатов не найдена: {OUTPUT_DIR}"
+    if not any(files for _, _, files in os.walk(OUTPUT_DIR)):
+        return None, f"Папка результатов пуста: {OUTPUT_DIR}"
+
+    def worker(progress):
+        archive_path = make_zip_from_folder(OUTPUT_DIR, progress)
+        return archive_path, "✅ ZIP готов. Нажмите «Скачать готовый ZIP»."
+
+    return start_archive_job("output", "⏳ Создаём output ZIP в фоне.", worker)
+
 
 def workspace_download_selected(path, selected_name):
     if not selected_name:
@@ -1094,16 +1277,136 @@ def workspace_download_selected(path, selected_name):
         _, relative_path = resolve_workspace_path(path)
         target_path, _ = resolve_workspace_path(os.path.join(relative_path, selected_name))
         if os.path.isdir(target_path):
-            return make_zip_from_folder(target_path), f"Папка упакована в ZIP: {selected_name}"
-        if os.path.isfile(target_path):
-            os.makedirs(FILE_DOWNLOAD_DIR, exist_ok=True)
-            download_path = os.path.join(
-                FILE_DOWNLOAD_DIR,
-                f"{int(time.time())}-{os.path.basename(target_path)}",
-            )
-            shutil.copy2(target_path, download_path)
-            return download_path, f"Файл готов к скачиванию: {selected_name}"
-        return None, "Можно скачать только файл или папку."
+            def worker(progress):
+                archive_path = make_zip_from_folder(target_path, progress)
+                return archive_path, f"✅ Папка упакована: {selected_name}"
+        elif os.path.isfile(target_path):
+            def worker(progress):
+                download_path = prepare_single_file(target_path, progress)
+                return download_path, f"✅ Файл готов: {selected_name}"
+        else:
+            return None, "Можно скачать только файл или папку."
+        return start_archive_job(
+            "workspace", f"⏳ Подготавливаем {selected_name} в фоне.", worker
+        )
+    except Exception as exc:
+        return None, f"Ошибка: {exc}"
+
+
+OUTPUT_IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"}
+OUTPUT_VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
+OUTPUT_AUDIO_EXTENSIONS = {".flac", ".m4a", ".mp3", ".ogg", ".wav"}
+OUTPUT_TEXT_EXTENSIONS = {".csv", ".json", ".log", ".md", ".txt", ".yaml", ".yml"}
+
+
+def resolve_output_path(relative_path):
+    normalized = os.path.normpath((relative_path or "").strip())
+    if normalized in ("", "."):
+        raise ValueError("Файл не выбран")
+    if normalized == ".." or normalized.startswith(f"..{os.sep}") or os.path.isabs(normalized):
+        raise ValueError("Путь вне output запрещен")
+    output_root = os.path.realpath(OUTPUT_DIR)
+    target_path = os.path.realpath(os.path.join(OUTPUT_DIR, normalized))
+    if target_path == output_root or not target_path.startswith(output_root + os.sep):
+        raise ValueError("Путь вне output запрещен")
+    return target_path, normalized
+
+
+def output_file_kind(path):
+    extension = os.path.splitext(path)[1].lower()
+    if extension in OUTPUT_IMAGE_EXTENSIONS:
+        return "Изображение"
+    if extension in OUTPUT_VIDEO_EXTENSIONS:
+        return "Видео"
+    if extension in OUTPUT_AUDIO_EXTENSIONS:
+        return "Аудио"
+    if extension in OUTPUT_TEXT_EXTENSIONS:
+        return "Текст"
+    return "Файл"
+
+
+def list_output_files():
+    if not os.path.isdir(OUTPUT_DIR):
+        return [], f"Папка output пока не создана: `{OUTPUT_DIR}`"
+    rows = []
+    for root, _, files in os.walk(OUTPUT_DIR):
+        for file_name in files:
+            full_path = os.path.join(root, file_name)
+            if os.path.islink(full_path) or not os.path.isfile(full_path):
+                continue
+            try:
+                stat = os.stat(full_path)
+            except OSError:
+                continue
+            relative_path = os.path.relpath(full_path, OUTPUT_DIR)
+            rows.append([
+                relative_path,
+                output_file_kind(full_path),
+                format_file_size(stat.st_size),
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+                stat.st_mtime,
+            ])
+    rows.sort(key=lambda row: (-row[4], row[0].lower()))
+    display_rows = [row[:4] for row in rows]
+    return display_rows, f"Найдено файлов: **{len(display_rows)}**"
+
+
+def get_output_preview_data(relative_path):
+    target_path, normalized = resolve_output_path(relative_path)
+    if not os.path.isfile(target_path):
+        raise ValueError("Файл не найден")
+    kind = output_file_kind(target_path)
+    text = ""
+    if kind == "Текст":
+        max_bytes = 512 * 1024
+        with open(target_path, "rb") as stream:
+            content = stream.read(max_bytes + 1)
+        truncated = len(content) > max_bytes
+        text = content[:max_bytes].decode("utf-8", errors="replace")
+        if truncated:
+            text += "\n\n… preview ограничен 512 KiB"
+    return kind, target_path, text, f"Открыт: `{normalized}`"
+
+
+def render_output_preview(relative_path):
+    try:
+        kind, target_path, text, status = get_output_preview_data(relative_path)
+    except Exception as exc:
+        return (
+            gr.Image(value=None, visible=False),
+            gr.Video(value=None, visible=False),
+            gr.Audio(value=None, visible=False),
+            gr.TextArea(value="", visible=False),
+            f"Ошибка preview: {exc}",
+        )
+    return (
+        gr.Image(value=target_path if kind == "Изображение" else None, visible=kind == "Изображение"),
+        gr.Video(value=target_path if kind == "Видео" else None, visible=kind == "Видео"),
+        gr.Audio(value=target_path if kind == "Аудио" else None, visible=kind == "Аудио"),
+        gr.TextArea(value=text if kind == "Текст" else "", visible=kind == "Текст", lines=18),
+        status if kind != "Файл" else f"{status} Preview для этого формата недоступен.",
+    )
+
+
+def select_output_file(table_data, evt: gr.SelectData):
+    row_index = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+    selected = table_cell_value(table_data, row_index)
+    return (selected, *render_output_preview(selected))
+
+
+def download_output_selected(relative_path):
+    try:
+        target_path, normalized = resolve_output_path(relative_path)
+        if not os.path.isfile(target_path):
+            return None, "Выбранный output-файл не найден."
+
+        def worker(progress):
+            download_path = prepare_single_file(target_path, progress)
+            return download_path, f"✅ Файл готов: {normalized}"
+
+        return start_archive_job(
+            "output_single", f"⏳ Подготавливаем {normalized} в фоне.", worker
+        )
     except Exception as exc:
         return None, f"Ошибка: {exc}"
 
@@ -1408,7 +1711,7 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                         btn_install = gr.Button("🚀 Установить ComfyUI с нуля", variant="secondary")
                         btn_refresh = gr.Button("🔄 Обновить статус")
 
-                    btn_download_output = gr.Button("📦 1. Создать output ZIP", variant="secondary")
+                    btn_download_output = gr.Button("📦 1. Создать output ZIP в фоне", variant="secondary")
                     output_download_file = gr.DownloadButton(
                         label="⬇️ 2. Скачать готовый ZIP",
                         value=None,
@@ -1432,7 +1735,48 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                 lines=15
             )
 
-        # Вкладка 2: Загрузчик моделей
+        # Вкладка 2: Output browser
+        with gr.TabItem("🎞️ Output"):
+            initial_output_rows, initial_output_status = list_output_files()
+            with gr.Row():
+                btn_output_refresh = gr.Button("🔄 Обновить список", variant="secondary")
+                btn_output_open = gr.Button("👁️ Открыть", variant="secondary")
+                btn_output_download_selected = gr.Button("⬇️ Скачать выбранный", variant="primary")
+                btn_output_download_all = gr.Button("📦 Скачать всё ZIP", variant="primary")
+
+            output_files_table = gr.Dataframe(
+                headers=["Путь", "Тип", "Размер", "Изменён"],
+                datatype=["str", "str", "str", "str"],
+                value=initial_output_rows,
+                label="Файлы ComfyUI/output — новые сверху",
+                interactive=False,
+                type="array",
+            )
+            selected_output_file = gr.Textbox(label="Выбранный файл", interactive=False)
+            output_listing_status = gr.Markdown(initial_output_status)
+
+            gr.Markdown("### Preview")
+            output_preview_image = gr.Image(label="Изображение", visible=False, interactive=False)
+            output_preview_video = gr.Video(label="Видео", visible=False, interactive=False)
+            output_preview_audio = gr.Audio(label="Аудио", visible=False, interactive=False)
+            output_preview_text = gr.TextArea(label="Текст", visible=False, interactive=False, lines=18)
+            output_preview_status = gr.Markdown("Выберите файл в таблице.")
+
+            with gr.Row():
+                output_selected_download_file = gr.DownloadButton(
+                    label="⬇️ Скачать выбранный файл",
+                    value=None,
+                    variant="primary",
+                )
+                output_all_download_file = gr.DownloadButton(
+                    label="⬇️ Скачать готовый ZIP",
+                    value=None,
+                    variant="primary",
+                )
+            output_selected_download_status = gr.Markdown("")
+            output_all_download_status = gr.Markdown("")
+
+        # Вкладка 3: Загрузчик моделей
         with gr.TabItem("📥 Загрузчик моделей"):
             secret_status = gr.Markdown(get_secret_status())
             gr.Markdown(
@@ -1498,7 +1842,7 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                 lines=10
             )
 
-        # Вкладка 3: Файловый менеджер моделей
+        # Вкладка 4: Файловый менеджер моделей
         with gr.TabItem("📁 Файловый менеджер"):
             gr.Markdown("### Просмотр и удаление моделей")
             with gr.Row():
@@ -1517,7 +1861,7 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
             btn_delete_file = gr.Button("❌ Удалить выбранный файл", variant="stop")
             file_manager_status = gr.Markdown("")
 
-        # Вкладка 4: Полный файловый менеджер /workspace
+        # Вкладка 5: Полный файловый менеджер /workspace
         with gr.TabItem("🗂️ Workspace"):
             initial_ws_path, initial_ws_rows, initial_ws_status = list_workspace_files("")
             with gr.Row():
@@ -1548,6 +1892,7 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                 value=None,
                 variant="primary",
             )
+            workspace_download_status = gr.Markdown("")
 
             with gr.Row():
                 workspace_upload = gr.File(
@@ -1585,7 +1930,7 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                 lines=14,
             )
 
-        # Вкладка 5: Установка кастомных нод
+        # Вкладка 6: Установка кастомных нод
         with gr.TabItem("🧩 Установка Custom Nodes"):
             gr.Markdown("### Установка расширений (Custom Nodes) по ссылке Git")
             with gr.Row():
@@ -1614,6 +1959,7 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
 
     # Автообновление статуса и ресурсов каждые 5 секунд
     auto_refresh_timer = gr.Timer(value=5)
+    archive_refresh_timer = gr.Timer(value=2)
 
     def periodic_status_update():
         status, pid = get_comfy_status()
@@ -1621,6 +1967,35 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
         return status, pid, stats
 
     auto_refresh_timer.tick(periodic_status_update, outputs=[status_indicator, pid_indicator, system_stats_box])
+
+    def refresh_archive_jobs():
+        output_path, output_status = get_archive_job_result("output")
+        output_single_path, output_single_status = get_archive_job_result("output_single")
+        workspace_path_value, workspace_download_message = get_archive_job_result("workspace")
+        return (
+            output_path,
+            output_status,
+            workspace_path_value,
+            workspace_download_message,
+            output_path,
+            output_status,
+            output_single_path,
+            output_single_status,
+        )
+
+    archive_refresh_timer.tick(
+        refresh_archive_jobs,
+        outputs=[
+            output_download_file,
+            output_download_status,
+            workspace_download_file,
+            workspace_download_status,
+            output_all_download_file,
+            output_all_download_status,
+            output_selected_download_file,
+            output_selected_download_status,
+        ],
+    )
 
     # Привязка логики к кнопкам Dashboard
     btn_start.click(start_comfy, inputs=[comfy_args], outputs=[status_indicator])
@@ -1630,6 +2005,44 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
     btn_download_output.click(
         download_comfy_output_folder,
         outputs=[output_download_file, output_download_status],
+    )
+
+    # Output browser
+    btn_output_refresh.click(
+        list_output_files,
+        outputs=[output_files_table, output_listing_status],
+    )
+    output_files_table.select(
+        select_output_file,
+        inputs=[output_files_table],
+        outputs=[
+            selected_output_file,
+            output_preview_image,
+            output_preview_video,
+            output_preview_audio,
+            output_preview_text,
+            output_preview_status,
+        ],
+    )
+    btn_output_open.click(
+        render_output_preview,
+        inputs=[selected_output_file],
+        outputs=[
+            output_preview_image,
+            output_preview_video,
+            output_preview_audio,
+            output_preview_text,
+            output_preview_status,
+        ],
+    )
+    btn_output_download_selected.click(
+        download_output_selected,
+        inputs=[selected_output_file],
+        outputs=[output_selected_download_file, output_selected_download_status],
+    )
+    btn_output_download_all.click(
+        download_comfy_output_folder,
+        outputs=[output_all_download_file, output_all_download_status],
     )
     
     def refresh_dashboard(num_lines):
@@ -1714,7 +2127,7 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
     btn_workspace_download.click(
         workspace_download_selected,
         inputs=[workspace_path, selected_workspace_entry],
-        outputs=[workspace_download_file, workspace_status],
+        outputs=[workspace_download_file, workspace_download_status],
     )
     btn_workspace_upload.click(
         workspace_upload_files,
@@ -1794,6 +2207,6 @@ if __name__ == "__main__":
         demo,
         path="/",
         auth=auth,
-        allowed_paths=[FILE_DOWNLOAD_DIR],
+        allowed_paths=[FILE_DOWNLOAD_DIR, OUTPUT_DIR],
     )
     uvicorn.run(mounted_app, host="0.0.0.0", port=7860)
