@@ -36,12 +36,15 @@ confirm_step() {
 }
 
 load_tokens() {
-    HF_TOKEN=${HF_TOKEN:-}
-    CIVITAI_API_TOKEN=${CIVITAI_API_TOKEN:-}
+    local secret_hf=${HF_TOKEN:-} secret_civitai=${CIVITAI_API_TOKEN:-}
+    HF_TOKEN=''
+    CIVITAI_API_TOKEN=''
     if [[ -f "$TOKEN_FILE" ]]; then
-        # Файл создается только этой утилитой и доступен лишь владельцу.
+        # Локальный fallback. RunPod Secrets/environment всегда имеют приоритет.
         source "$TOKEN_FILE"
     fi
+    HF_TOKEN=${secret_hf:-${HF_TOKEN:-}}
+    CIVITAI_API_TOKEN=${secret_civitai:-${CIVITAI_API_TOKEN:-}}
 }
 
 save_tokens() {
@@ -392,6 +395,52 @@ validate_model_folder() {
     fi
 }
 
+try_hf_xet_download() {
+    local url=$1 target=$2
+    command -v python3 >/dev/null 2>&1 || return 1
+
+    HF_XET_HIGH_PERFORMANCE="${HF_XET_HIGH_PERFORMANCE:-1}" \
+        python3 - "$url" "$target" <<'PY'
+import os
+import shutil
+import sys
+from urllib.parse import unquote, urlparse
+
+try:
+    from huggingface_hub import hf_hub_download
+except ImportError:
+    raise SystemExit(3)
+
+url, target = sys.argv[1:]
+parsed = urlparse(url)
+parts = [unquote(part) for part in parsed.path.split("/") if part]
+if parsed.hostname not in {"huggingface.co", "www.huggingface.co"}:
+    raise SystemExit(4)
+if len(parts) < 5 or parts[2] != "resolve":
+    raise SystemExit(5)
+
+repo_id = "/".join(parts[:2])
+revision = parts[3]
+filename = "/".join(parts[4:])
+cached_path = hf_hub_download(
+    repo_id=repo_id,
+    filename=filename,
+    revision=revision,
+    token=os.environ.get("HF_TOKEN") or None,
+)
+
+os.makedirs(os.path.dirname(target), exist_ok=True)
+try:
+    os.unlink(target)
+except FileNotFoundError:
+    pass
+try:
+    os.link(cached_path, target)
+except OSError:
+    shutil.copy2(cached_path, target)
+PY
+}
+
 download_model() {
     local supplied_url=${1:-}
     local forced_folder=${2:-}
@@ -403,6 +452,7 @@ download_model() {
     local url url_path suggested_name filename destination header_file temp_file
     local source_host metrics http_code transferred average_speed total_time redirects
     local final_size free_space partial_size
+    local transfer_backend='curl' transfer_started transfer_finished
     local inference inferred_dir inference_reason metadata_inference answer server_filename url_key
     local dir selection_mode=auto
     local -a curl_args=()
@@ -501,19 +551,39 @@ download_model() {
     fi
 
     printf '\n%b\n' "${GREEN}Загрузка началась.${NC}"
-    printf '%s\n' "Прогресс curl: %% получено | размер | средняя скорость | время | осталось | текущая скорость"
     header_file=$(mktemp)
-    if ! metrics=$(curl "${curl_args[@]}" --dump-header "$header_file" \
-        --write-out $'%{http_code}\t%{size_download}\t%{speed_download}\t%{time_total}\t%{num_redirects}' \
-        --output "$temp_file" "$url"); then
-        rm -f -- "$header_file"
-        error "Загрузка не удалась. Проверьте ссылку и токен сайта."
-        return 1
+    transfer_started=$(date +%s)
+
+    if [[ "$url" == https://huggingface.co/*/resolve/* ]] && \
+        try_hf_xet_download "$url" "$temp_file"; then
+        transfer_backend='hf-xet (high performance)'
+        transfer_finished=$(date +%s)
+        total_time=$(( transfer_finished - transfer_started ))
+        final_size=$(stat -c '%s' "$temp_file")
+        transferred=$final_size
+        average_speed=$(awk -v size="$final_size" -v seconds="${total_time:-0}" \
+            'BEGIN { print (seconds > 0 ? size / seconds : size) }')
+        http_code='HF Hub'
+        redirects='n/a'
+        server_filename=''
+    else
+        if [[ "$url" == https://huggingface.co/*/resolve/* ]]; then
+            warn "hf-xet недоступен или не принял ссылку. Используем надежный fallback curl."
+        fi
+        printf '%s\n' "Прогресс curl: %% получено | размер | средняя скорость | время | осталось | текущая скорость"
+        if ! metrics=$(curl "${curl_args[@]}" --dump-header "$header_file" \
+            --write-out $'%{http_code}\t%{size_download}\t%{speed_download}\t%{time_total}\t%{num_redirects}' \
+            --output "$temp_file" "$url"); then
+            rm -f -- "$header_file"
+            error "Загрузка не удалась. Проверьте ссылку и токен сайта."
+            return 1
+        fi
+
+        IFS=$'\t' read -r http_code transferred average_speed total_time redirects <<< "$metrics"
+        final_size=$(stat -c '%s' "$temp_file")
+        server_filename=$(get_response_filename "$header_file" || true)
     fi
 
-    IFS=$'\t' read -r http_code transferred average_speed total_time redirects <<< "$metrics"
-    final_size=$(stat -c '%s' "$temp_file")
-    server_filename=$(get_response_filename "$header_file" || true)
     if [[ "$batch_mode" == true && -n "$server_filename" &&
         ( "$filename" == "model.safetensors" || "$filename" =~ ^[0-9]+$ ||
           ! "$filename" =~ \.(safetensors|ckpt|pt|pth|bin|gguf)$ ) ]]; then
@@ -521,6 +591,7 @@ download_model() {
         filename=$server_filename
     fi
     printf '\n%b\n' "${BLUE}Результат передачи:${NC}"
+    printf '  Транспорт:      %s\n' "$transfer_backend"
     printf '  HTTP-код:       %s\n' "$http_code"
     printf '  Получено:       %s\n' "$(format_bytes "$transferred")"
     printf '  Размер файла:   %s\n' "$(format_bytes "$final_size")"

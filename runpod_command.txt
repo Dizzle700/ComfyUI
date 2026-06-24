@@ -1,6 +1,3 @@
-# Скопируйте и вставьте эту команду в поле "Docker Command" или "Startup Command" в настройках пода на RunPod:
-
-
 # Инструкция:
 # 1. Перед запуском убедитесь, что последние изменения запушены в репозиторий.
 # 2. Эта версия хранит startup-скрипты в /workspace/runpod-scripts и обновляет их при рестарте.
@@ -11,8 +8,24 @@
 #    - Port 8188 (для ComfyUI)
 # 4. ComfyUI запускается автоматически вместе с панелью. Чтобы отключить это,
 #    задайте переменную окружения AUTO_START_COMFY=0.
-# 5. Панель содержит файловый менеджер и Terminal. Для публичного пода обязательно
-#    задайте RunPod Secrets/Environment Variables: PANEL_USER и PANEL_PASS.
+# 5. До запуска создайте RunPod Secrets и свяжите их с Environment Variables:
+#
+#    Environment Variable    Значение из RunPod Secret
+#    PANEL_USER              {{ RUNPOD_SECRET_comfy_panel_user }}
+#    PANEL_PASS              {{ RUNPOD_SECRET_comfy_panel_password }}
+#    HF_TOKEN                {{ RUNPOD_SECRET_huggingface_token }}
+#    CIVITAI_API_TOKEN       {{ RUNPOD_SECRET_civitai_token }}       (опционально)
+#    NANO_BANANA_API_KEY     {{ RUNPOD_SECRET_nano_banana_api_key }} (опционально)
+#
+#    PANEL_USER и PANEL_PASS обязательны: панель с Terminal не запустится без них.
+#    Значения из RunPod Secrets не сохраняются на диске и не показываются в браузере.
+#
+#    Альтернатива для личного pod: скопируйте .env.secrets.example в .env.secrets,
+#    заполните значения и выполните chmod 600 .env.secrets. Этот файл игнорируется
+#    Git и сохраняется вместе с /workspace/runpod-scripts. RunPod Secrets имеют
+#    приоритет над значениями из файла. Путь можно изменить через COMFY_SECRET_FILE.
+# 6. Ускоренная загрузка Hugging Face через hf-xet включена автоматически:
+#    HF_XET_HIGH_PERFORMANCE=1. При необходимости ее можно отключить значением 0.
 
 
 

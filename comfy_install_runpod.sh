@@ -18,15 +18,19 @@ fi
 export COMFY_DIR
 
 if [[ -d "/workspace" ]]; then
+    export HF_XET_HIGH_PERFORMANCE="${HF_XET_HIGH_PERFORMANCE:-1}"
     export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/workspace/.cache}"
     export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/workspace/.cache/pip}"
     export TORCH_HOME="${TORCH_HOME:-/workspace/.cache/torch}"
     export HF_HOME="${HF_HOME:-/workspace/.cache/huggingface}"
-    export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-/workspace/.cache/huggingface/hub}"
+    export HF_HUB_CACHE="${HF_HUB_CACHE:-${HUGGINGFACE_HUB_CACHE:-/workspace/.cache/huggingface/hub}}"
+    export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HUB_CACHE}"
     export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-/workspace/.cache/huggingface/transformers}"
     export DIFFUSERS_CACHE="${DIFFUSERS_CACHE:-/workspace/.cache/huggingface/diffusers}"
+    export HF_XET_CACHE="${HF_XET_CACHE:-/workspace/.cache/huggingface/xet}"
     mkdir -p "$PIP_CACHE_DIR" "$TORCH_HOME" \
-        "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE" "$DIFFUSERS_CACHE"
+        "$HF_HOME" "$HF_HUB_CACHE" "$TRANSFORMERS_CACHE" "$DIFFUSERS_CACHE" \
+        "$HF_XET_CACHE"
 fi
 
 START_PANEL=true
@@ -160,9 +164,9 @@ if "$PYTHON_EXE" -m pip show hf-gradio >/dev/null 2>&1; then
     "$PYTHON_EXE" -m pip uninstall -y hf-gradio
 fi
 "$PYTHON_EXE" -m pip install \
-    "gradio>=5.5.0,<6.0.0" fastapi uvicorn psutil tiktoken sentencepiece protobuf hf_transfer \
+    "gradio>=5.5.0,<6.0.0" fastapi uvicorn psutil tiktoken sentencepiece protobuf \
     "transformers[sentencepiece]>=4.46.2,<5.0.0" \
-    "huggingface-hub>=0.34.0,<1.0.0"
+    "huggingface-hub[hf_xet]>=0.34.0,<1.0.0"
 
 # Копирование pisa_sr.pkl, если он лежит в папке со скриптом
 if [[ -f "$SCRIPT_DIR/pisa_sr.pkl" ]]; then

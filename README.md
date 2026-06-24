@@ -271,6 +271,10 @@ export NANO_BANANA_API_KEY="your-api-key-here"
 
 The code also checks `FAL_KEY` as a fallback.
 
+On RunPod, store this value as a RunPod Secret and map it to the
+`NANO_BANANA_API_KEY` environment variable. Do not enter API keys into workflow
+widgets or save them in workflow JSON files.
+
 ### `external_ref`
 
 Uses user-provided high-resolution reference images.

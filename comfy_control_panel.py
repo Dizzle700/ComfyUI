@@ -21,10 +21,50 @@ from fastapi import FastAPI, HTTPException, Request
 
 # Определение путей
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SECRET_ENV_FILE = os.environ.get(
+    "COMFY_SECRET_FILE",
+    os.path.join(BASE_DIR, ".env.secrets"),
+)
+SECRET_ENV_KEYS = {
+    "PANEL_USER",
+    "PANEL_PASS",
+    "HF_TOKEN",
+    "CIVITAI_API_TOKEN",
+    "NANO_BANANA_API_KEY",
+    "FAL_KEY",
+}
+
+
+def load_secret_environment():
+    """Load a restricted dotenv file; existing environment variables win."""
+    if not os.path.isfile(SECRET_ENV_FILE):
+        return
+    os.chmod(SECRET_ENV_FILE, 0o600)
+    with open(SECRET_ENV_FILE, encoding="utf-8") as stream:
+        for number, raw_line in enumerate(stream, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, separator, raw_value = line.partition("=")
+            key = key.strip()
+            if not separator or key not in SECRET_ENV_KEYS:
+                raise RuntimeError(
+                    f"Некорректная строка {number} в {SECRET_ENV_FILE}"
+                )
+            values = shlex.split(raw_value, comments=True, posix=True)
+            if len(values) > 1:
+                raise RuntimeError(
+                    f"Значение в строке {number} нужно заключить в кавычки"
+                )
+            if not os.environ.get(key):
+                os.environ[key] = values[0] if values else ""
+
+
+load_secret_environment()
+
 COMFY_DIR = os.environ.get("COMFY_DIR", "/workspace/ComfyUI" if os.path.exists("/workspace") else os.path.join(BASE_DIR, "ComfyUI"))
 LOG_FILE = os.path.join(COMFY_DIR, "comfyui.log")
 DOWNLOADER_SCRIPT = os.path.join(BASE_DIR, "comfy_model_downloader.sh")
-TOKENS_ENV_FILE = os.path.expanduser("~/.config/comfy-model-downloader/tokens.env")
 FILE_MANAGER_ROOT = "/workspace" if os.path.exists("/workspace") else BASE_DIR
 FILE_DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "comfy-control-downloads")
 os.makedirs(FILE_DOWNLOAD_DIR, exist_ok=True)
@@ -615,29 +655,25 @@ def install_seedvr2():
 
 # Управление токенами
 def load_tokens():
-    hf_token = ""
-    civitai_token = ""
-    if os.path.exists(TOKENS_ENV_FILE):
-        try:
-            with open(TOKENS_ENV_FILE, "r") as f:
-                for line in f:
-                    if line.startswith("HF_TOKEN="):
-                        hf_token = line.split("=", 1)[1].strip().strip("'\"")
-                    elif line.startswith("CIVITAI_API_TOKEN="):
-                        civitai_token = line.split("=", 1)[1].strip().strip("'\"")
-        except Exception:
-            pass
-    return hf_token, civitai_token
+    """Read loaded credentials without exposing their values in the UI."""
+    return (
+        os.environ.get("HF_TOKEN", "").strip(),
+        os.environ.get("CIVITAI_API_TOKEN", "").strip(),
+    )
 
-def save_tokens(hf_token, civitai_token):
-    os.makedirs(os.path.dirname(TOKENS_ENV_FILE), exist_ok=True)
-    try:
-        with open(TOKENS_ENV_FILE, "w") as f:
-            f.write(f"HF_TOKEN='{hf_token.strip()}'\n")
-            f.write(f"CIVITAI_API_TOKEN='{civitai_token.strip()}'\n")
-        return "Токены успешно сохранены в ~/.config/comfy-model-downloader/tokens.env"
-    except Exception as e:
-        return f"Ошибка сохранения токенов: {str(e)}"
+
+def get_secret_status():
+    secret_names = (
+        "HF_TOKEN",
+        "CIVITAI_API_TOKEN",
+        "NANO_BANANA_API_KEY",
+        "FAL_KEY",
+    )
+    rows = [
+        f"- `{name}`: {'✅ настроен' if os.environ.get(name) else '➖ не настроен'}"
+        for name in secret_names
+    ]
+    return "### RunPod Secrets\n" + "\n".join(rows)
 
 def build_downloader_env():
     env = os.environ.copy()
@@ -1367,13 +1403,13 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
 
         # Вкладка 2: Загрузчик моделей
         with gr.TabItem("📥 Загрузчик моделей"):
-            gr.Markdown("### Настройка токенов доступа (Hugging Face / Civitai)")
-            init_hf, init_civi = load_tokens()
-            with gr.Row():
-                hf_token_input = gr.Textbox(label="Hugging Face Token", value=init_hf, type="password")
-                civitai_token_input = gr.Textbox(label="Civitai API Key", value=init_civi, type="password")
-            btn_save_tokens = gr.Button("💾 Сохранить токены")
-            token_status = gr.Markdown("")
+            secret_status = gr.Markdown(get_secret_status())
+            gr.Markdown(
+                "Ключи читаются из RunPod Secrets / environment variables или локального "
+                "`.env.secrets` и никогда не передаются в браузер. После изменения "
+                "секретов перезапустите Pod."
+            )
+            btn_refresh_secrets = gr.Button("🔄 Проверить Secrets")
             
             gr.Markdown("---")
             gr.Markdown("### Загрузка новой модели")
@@ -1574,8 +1610,8 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
     btn_refresh.click(periodic_status_update, outputs=[status_indicator, pid_indicator, system_stats_box])
     btn_refresh_logs.click(read_logs, inputs=[lines_slider], outputs=[log_output])
     
-    # Привязка логики токенов
-    btn_save_tokens.click(save_tokens, inputs=[hf_token_input, civitai_token_input], outputs=[token_status])
+    # Показываем только факт наличия Secrets, не их значения.
+    btn_refresh_secrets.click(get_secret_status, outputs=[secret_status])
     
     # Скачивание моделей
     btn_download.click(
@@ -1700,6 +1736,19 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
     demo.load(fn=None, js=CHUNK_UPLOADER_JS)
 
 if __name__ == "__main__":
+    panel_user = os.environ.get("PANEL_USER", "").strip()
+    panel_pass = os.environ.get("PANEL_PASS", "")
+    if not panel_user or not panel_pass:
+        print(
+            "ОШИБКА: задайте PANEL_USER и PANEL_PASS через RunPod Secrets "
+            "или .env.secrets. "
+            "Панель с Terminal не запускается без аутентификации.",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise SystemExit(2)
+    auth = (panel_user, panel_pass)
+
     # На RunPod по умолчанию запускаем ComfyUI вместе с панелью. Отключить можно
     # переменной AUTO_START_COMFY=0 и затем запускать сервер кнопкой в панели.
     auto_start = os.environ.get("AUTO_START_COMFY", "1").strip().lower()
@@ -1709,13 +1758,6 @@ if __name__ == "__main__":
     # Запуск Gradio. Порт 7860 по умолчанию.
     # Флаг share=True не рекомендуется запускать без пароля на публичных подах,
     # но bind на 0.0.0.0 позволяет открыть веб-интерфейс через прокси-порт RunPod.
-    panel_pass = os.environ.get("PANEL_PASS", "")
-    auth = (os.environ.get("PANEL_USER", "admin"), panel_pass) if panel_pass else None
-    if auth is None:
-        print(
-            "ВНИМАНИЕ: PANEL_PASS не задан. Панель с Terminal доступна без пароля!",
-            flush=True,
-        )
     mounted_app = gr.mount_gradio_app(
         panel_app,
         demo,
