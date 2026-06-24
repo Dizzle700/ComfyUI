@@ -397,10 +397,11 @@ validate_model_folder() {
 
 try_hf_xet_download() {
     local url=$1 target=$2
+    local python_pid started elapsed next_report=15 status
     command -v python3 >/dev/null 2>&1 || return 1
 
     HF_XET_HIGH_PERFORMANCE="${HF_XET_HIGH_PERFORMANCE:-1}" \
-        python3 - "$url" "$target" <<'PY'
+        python3 -u - "$url" "$target" <<'PY' &
 import os
 import shutil
 import sys
@@ -422,12 +423,15 @@ if len(parts) < 5 or parts[2] != "resolve":
 repo_id = "/".join(parts[:2])
 revision = parts[3]
 filename = "/".join(parts[4:])
-cached_path = hf_hub_download(
+print(f"hf-xet: {repo_id}@{revision}/{filename}", flush=True)
+cached_path = os.path.realpath(hf_hub_download(
     repo_id=repo_id,
     filename=filename,
     revision=revision,
     token=os.environ.get("HF_TOKEN") or None,
-)
+))
+if not os.path.isfile(cached_path):
+    raise RuntimeError(f"HF cache blob not found: {cached_path}")
 
 os.makedirs(os.path.dirname(target), exist_ok=True)
 try:
@@ -438,7 +442,24 @@ try:
     os.link(cached_path, target)
 except OSError:
     shutil.copy2(cached_path, target)
+print(f"hf-xet: получен файл размером {os.path.getsize(target)} байт", flush=True)
 PY
+    python_pid=$!
+    started=$SECONDS
+    while kill -0 "$python_pid" 2>/dev/null; do
+        sleep 2
+        elapsed=$(( SECONDS - started ))
+        if (( elapsed >= next_report )); then
+            info "hf-xet: загрузка продолжается, прошло $(format_duration "$elapsed")..."
+            next_report=$(( next_report + 15 ))
+        fi
+    done
+    if wait "$python_pid"; then
+        return 0
+    else
+        status=$?
+        return "$status"
+    fi
 }
 
 download_model() {

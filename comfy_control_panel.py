@@ -88,6 +88,7 @@ install_lock = threading.Lock()
 # Лог скачивания моделей
 download_logs = deque(maxlen=1000)
 download_lock = threading.Lock()
+download_job_lock = threading.Lock()
 
 def add_download_log(text):
     with download_lock:
@@ -692,8 +693,11 @@ def run_download_model(url, folder, filename):
     
     if not os.path.exists(DOWNLOADER_SCRIPT):
         return f"Загрузчик не найден: {DOWNLOADER_SCRIPT}"
+
+    if not download_job_lock.acquire(blocking=False):
+        return "Другая загрузка уже выполняется. Дождитесь ее завершения."
     
-    def worker():
+    def download_worker():
         add_download_log(f"--- Старт загрузки: {time.strftime('%H:%M:%S')} ---")
         add_download_log(f"Ссылка: {url}")
         
@@ -726,8 +730,20 @@ def run_download_model(url, folder, filename):
                 
         proc.wait()
         add_download_log(f"--- Загрузка завершена с кодом {proc.returncode} ---")
-        
-    threading.Thread(target=worker, daemon=True).start()
+
+    def worker():
+        try:
+            download_worker()
+        except Exception as exc:
+            add_download_log(f"Ошибка фоновой загрузки: {exc}")
+        finally:
+            download_job_lock.release()
+
+    try:
+        threading.Thread(target=worker, daemon=True).start()
+    except Exception:
+        download_job_lock.release()
+        raise
     return "Загрузка запущена в фоновом режиме. Перейдите к логу ниже для отслеживания."
 
 def get_uploaded_file_path(uploaded_file):
@@ -858,7 +874,10 @@ def run_download_batch(txt_file, parallel_count):
     if not os.path.exists(DOWNLOADER_SCRIPT):
         return f"Загрузчик не найден: {DOWNLOADER_SCRIPT}"
 
-    def worker():
+    if not download_job_lock.acquire(blocking=False):
+        return "Другая загрузка уже выполняется. Дождитесь ее завершения."
+
+    def batch_worker():
         add_download_log(f"--- Старт пакетной загрузки: {time.strftime('%H:%M:%S')} ---")
         add_download_log(f"TXT: {list_path}")
         parallel = max(1, int(parallel_count or 1))
@@ -876,7 +895,19 @@ def run_download_batch(txt_file, parallel_count):
             run_parallel_batch_download(list_path, parallel)
             add_download_log("--- Параллельная пакетная загрузка завершена ---")
 
-    threading.Thread(target=worker, daemon=True).start()
+    def worker():
+        try:
+            batch_worker()
+        except Exception as exc:
+            add_download_log(f"Ошибка пакетной загрузки: {exc}")
+        finally:
+            download_job_lock.release()
+
+    try:
+        threading.Thread(target=worker, daemon=True).start()
+    except Exception:
+        download_job_lock.release()
+        raise
     return "Пакетная загрузка запущена в фоновом режиме. Лог ниже."
 
 # Файловый менеджер

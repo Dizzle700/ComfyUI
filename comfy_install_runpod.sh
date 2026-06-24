@@ -165,6 +165,7 @@ if "$PYTHON_EXE" -m pip show hf-gradio >/dev/null 2>&1; then
 fi
 "$PYTHON_EXE" -m pip install \
     "gradio>=5.5.0,<6.0.0" fastapi uvicorn psutil tiktoken sentencepiece protobuf \
+    "chardet>=5.0.0,<6.0.0" \
     "transformers[sentencepiece]>=4.46.2,<5.0.0" \
     "huggingface-hub[hf_xet]>=0.34.0,<1.0.0"
 
