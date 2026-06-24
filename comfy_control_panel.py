@@ -12,7 +12,9 @@ import queue
 import shlex
 import sys
 import secrets
+import sqlite3
 from collections import deque
+from urllib.parse import urlsplit
 import gradio as gr
 import psutil
 import uvicorn
@@ -949,16 +951,214 @@ def browse_folder(folder_name):
 def delete_model_file(folder_name, file_name):
     if not folder_name or not file_name:
         return "Не выбрана папка или файл", []
-        
-    file_path = os.path.join(COMFY_DIR, "models", folder_name, file_name)
-    if os.path.exists(file_path):
-        try:
+
+    try:
+        file_path, normalized = resolve_model_inventory_path(os.path.join(folder_name, file_name))
+        if os.path.isfile(file_path) and not os.path.islink(file_path):
             os.remove(file_path)
+            remove_registry_record(normalized)
             updated_list = browse_folder(folder_name)
             return f"Файл {file_name} успешно удален.", updated_list
-        except Exception as e:
-            return f"Не удалось удалить файл: {str(e)}", browse_folder(folder_name)
-    return "Файл не найден.", browse_folder(folder_name)
+        return "Файл не найден.", browse_folder(folder_name)
+    except Exception as e:
+        return f"Не удалось удалить файл: {str(e)}", browse_folder(folder_name)
+
+
+MODEL_REGISTRY_PATH = os.path.join(COMFY_DIR, "models", ".download-registry.sqlite3")
+MODEL_FILE_EXTENSIONS = {
+    ".bin", ".ckpt", ".gguf", ".onnx", ".pkl", ".pt", ".pth", ".safetensors",
+}
+
+
+def open_model_registry():
+    os.makedirs(os.path.dirname(MODEL_REGISTRY_PATH), exist_ok=True)
+    connection = sqlite3.connect(MODEL_REGISTRY_PATH, timeout=30)
+    connection.execute("PRAGMA busy_timeout = 30000")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS downloads (
+            path TEXT PRIMARY KEY,
+            source_url TEXT NOT NULL,
+            folder TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            backend TEXT NOT NULL,
+            downloaded_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.commit()
+    os.chmod(MODEL_REGISTRY_PATH, 0o600)
+    return connection
+
+
+def read_model_registry():
+    with open_model_registry() as connection:
+        rows = connection.execute(
+            "SELECT path, source_url, size_bytes, backend, downloaded_at FROM downloads"
+        ).fetchall()
+    return {
+        row[0]: {
+            "source_url": row[1],
+            "size_bytes": row[2],
+            "backend": row[3],
+            "downloaded_at": row[4],
+        }
+        for row in rows
+    }
+
+
+def resolve_model_inventory_path(relative_path):
+    normalized = os.path.normpath((relative_path or "").strip())
+    if normalized in ("", ".", "..") or normalized.startswith(f"..{os.sep}") or os.path.isabs(normalized):
+        raise ValueError("Некорректный путь модели")
+    models_root = os.path.realpath(os.path.join(COMFY_DIR, "models"))
+    target_path = os.path.realpath(os.path.join(models_root, normalized))
+    if not target_path.startswith(models_root + os.sep):
+        raise ValueError("Путь вне models запрещен")
+    return target_path, normalized
+
+
+def list_model_inventory():
+    models_root = os.path.join(COMFY_DIR, "models")
+    registry = read_model_registry()
+    inventory = {}
+    if os.path.isdir(models_root):
+        for root, _, files in os.walk(models_root):
+            for file_name in files:
+                if os.path.splitext(file_name)[1].lower() not in MODEL_FILE_EXTENSIONS:
+                    continue
+                full_path = os.path.join(root, file_name)
+                if os.path.islink(full_path) or not os.path.isfile(full_path):
+                    continue
+                relative_path = os.path.relpath(full_path, models_root)
+                try:
+                    stat = os.stat(full_path)
+                except OSError:
+                    continue
+                record = registry.get(relative_path)
+                inventory[relative_path] = [
+                    relative_path,
+                    "Загрузчик" if record else "Найден на диске",
+                    format_file_size(stat.st_size),
+                    record["source_url"] if record else "—",
+                    record["downloaded_at"] if record else time.strftime(
+                        "%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)
+                    ),
+                    record["downloaded_at"] if record else f"0-{stat.st_mtime:020.3f}",
+                ]
+    for relative_path, record in registry.items():
+        if relative_path not in inventory:
+            inventory[relative_path] = [
+                relative_path,
+                "Отсутствует",
+                format_file_size(record["size_bytes"]),
+                record["source_url"],
+                record["downloaded_at"],
+                record["downloaded_at"],
+            ]
+    rows = sorted(inventory.values(), key=lambda row: row[5], reverse=True)
+    display_rows = [row[:5] for row in rows]
+    return display_rows, f"Моделей в inventory: **{len(display_rows)}**, зарегистрировано загрузчиком: **{len(registry)}**"
+
+
+def select_model_inventory_entry(table_data, evt: gr.SelectData):
+    row_index = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+    return table_cell_value(table_data, row_index)
+
+
+def remove_registry_record(relative_path):
+    with open_model_registry() as connection:
+        connection.execute("DELETE FROM downloads WHERE path = ?", (relative_path,))
+        connection.commit()
+
+
+def remove_huggingface_repo_cache(source_url):
+    parts = urlsplit(source_url)
+    path_parts = [part for part in parts.path.split("/") if part]
+    if parts.hostname not in {"huggingface.co", "www.huggingface.co"} or len(path_parts) < 2:
+        return False
+    owner, repo = path_parts[:2]
+    if any(not value or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for char in value) for value in (owner, repo)):
+        return False
+    cache_root = os.path.realpath(
+        os.environ.get("HF_HUB_CACHE", os.path.join(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")), "hub"))
+    )
+    repo_cache = os.path.realpath(os.path.join(cache_root, f"models--{owner}--{repo}"))
+    if not repo_cache.startswith(cache_root + os.sep):
+        return False
+    if os.path.isdir(repo_cache):
+        shutil.rmtree(repo_cache)
+        return True
+    return False
+
+
+def delete_inventory_model(relative_path, delete_hf_cache):
+    if not relative_path:
+        rows, _ = list_model_inventory()
+        return "Выберите модель.", rows, ""
+    if download_job_lock.locked():
+        rows, _ = list_model_inventory()
+        return "Дождитесь завершения загрузки моделей.", rows, relative_path
+    try:
+        registry = read_model_registry()
+        record = registry.get(relative_path)
+        target_path, normalized = resolve_model_inventory_path(relative_path)
+        removed_file = False
+        if os.path.isfile(target_path) and not os.path.islink(target_path):
+            os.remove(target_path)
+            removed_file = True
+        remove_registry_record(normalized)
+        cache_removed = bool(
+            delete_hf_cache and record and remove_huggingface_repo_cache(record["source_url"])
+        )
+        rows, summary = list_model_inventory()
+        details = []
+        if removed_file:
+            details.append("файл удалён")
+        else:
+            details.append("запись очищена; файла уже не было")
+        if cache_removed:
+            details.append("HF cache репозитория очищен")
+        return f"✅ `{normalized}`: {', '.join(details)}. {summary}", rows, ""
+    except Exception as exc:
+        rows, _ = list_model_inventory()
+        return f"Ошибка удаления: {exc}", rows, relative_path
+
+
+def delete_all_registered_models(confirmed, delete_hf_cache):
+    if not confirmed:
+        rows, _ = list_model_inventory()
+        return "Сначала включите подтверждение удаления.", rows, False
+    if download_job_lock.locked():
+        rows, _ = list_model_inventory()
+        return "Дождитесь завершения загрузки моделей.", rows, False
+    registry = read_model_registry()
+    removed = 0
+    failed = 0
+    source_urls = set()
+    for relative_path, record in registry.items():
+        try:
+            target_path, normalized = resolve_model_inventory_path(relative_path)
+            if os.path.isfile(target_path) and not os.path.islink(target_path):
+                os.remove(target_path)
+                removed += 1
+            remove_registry_record(normalized)
+            source_urls.add(record["source_url"])
+        except Exception:
+            failed += 1
+    caches_removed = 0
+    if delete_hf_cache:
+        for source_url in source_urls:
+            try:
+                caches_removed += int(remove_huggingface_repo_cache(source_url))
+            except OSError:
+                failed += 1
+    rows, summary = list_model_inventory()
+    return (
+        f"Удалено зарегистрированных моделей: **{removed}**; HF caches: **{caches_removed}**; ошибок: **{failed}**. {summary}",
+        rows,
+        False,
+    )
 
 # Полный файловый менеджер для Gradio Control Panel.
 def normalize_workspace_path(path):
@@ -1844,6 +2044,37 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
 
         # Вкладка 4: Файловый менеджер моделей
         with gr.TabItem("📁 Файловый менеджер"):
+            gr.Markdown("### Inventory всех моделей")
+            initial_inventory_rows, initial_inventory_status = list_model_inventory()
+            with gr.Row():
+                btn_inventory_refresh = gr.Button("🔄 Обновить inventory", variant="secondary")
+                btn_inventory_delete = gr.Button("❌ Удалить выбранную модель", variant="stop")
+            model_inventory_table = gr.Dataframe(
+                headers=["Путь", "Статус", "Размер", "Источник", "Дата"],
+                datatype=["str", "str", "str", "str", "str"],
+                value=initial_inventory_rows,
+                label="Все веса в ComfyUI/models — зарегистрированные загрузки отмечены отдельно",
+                interactive=False,
+                type="array",
+            )
+            selected_inventory_model = gr.Textbox(label="Выбранная модель", interactive=False)
+            delete_hf_cache = gr.Checkbox(
+                label="Также очистить HF cache репозитория (освобождает место)",
+                value=True,
+            )
+            inventory_status = gr.Markdown(initial_inventory_status)
+
+            gr.Markdown("#### Массовое удаление")
+            confirm_delete_all_models = gr.Checkbox(
+                label="Подтверждаю удаление всех моделей, зарегистрированных загрузчиком",
+                value=False,
+            )
+            btn_delete_all_registered = gr.Button(
+                "🗑️ Удалить все зарегистрированные модели",
+                variant="stop",
+            )
+
+            gr.Markdown("---")
             gr.Markdown("### Просмотр и удаление моделей")
             with gr.Row():
                 folder_select = gr.Dropdown(choices=list_model_folders(), label="Выберите категорию моделей")
@@ -2071,6 +2302,26 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
     btn_refresh_dl.click(get_download_logs, outputs=[dl_log_output])
 
     # Файловый менеджер
+    btn_inventory_refresh.click(
+        list_model_inventory,
+        outputs=[model_inventory_table, inventory_status],
+    )
+    model_inventory_table.select(
+        select_model_inventory_entry,
+        inputs=[model_inventory_table],
+        outputs=[selected_inventory_model],
+    )
+    btn_inventory_delete.click(
+        delete_inventory_model,
+        inputs=[selected_inventory_model, delete_hf_cache],
+        outputs=[inventory_status, model_inventory_table, selected_inventory_model],
+    )
+    btn_delete_all_registered.click(
+        delete_all_registered_models,
+        inputs=[confirm_delete_all_models, delete_hf_cache],
+        outputs=[inventory_status, model_inventory_table, confirm_delete_all_models],
+    )
+
     def update_file_list(folder):
         return browse_folder(folder)
         

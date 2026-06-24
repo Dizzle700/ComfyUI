@@ -462,6 +462,72 @@ PY
     fi
 }
 
+record_model_download() {
+    local destination=$1 source_url=$2 folder=$3 size_bytes=$4 backend=$5
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$COMFY_DIR" "$destination" "$source_url" "$folder" "$size_bytes" "$backend" <<'PY'
+import os
+import sqlite3
+import sys
+from datetime import datetime, timezone
+from urllib.parse import urlsplit, urlunsplit
+
+comfy_dir, destination, source_url, folder, size_bytes, backend = sys.argv[1:]
+models_root = os.path.realpath(os.path.join(comfy_dir, "models"))
+destination = os.path.realpath(destination)
+if not destination.startswith(models_root + os.sep):
+    raise SystemExit("model path is outside models directory")
+
+parts = urlsplit(source_url)
+hostname = parts.hostname or ""
+if ":" in hostname and not hostname.startswith("["):
+    hostname = f"[{hostname}]"
+netloc = f"{hostname}:{parts.port}" if parts.port else hostname
+safe_url = urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+relative_path = os.path.relpath(destination, models_root)
+registry_path = os.path.join(models_root, ".download-registry.sqlite3")
+connection = sqlite3.connect(registry_path, timeout=30)
+try:
+    connection.execute("PRAGMA busy_timeout = 30000")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS downloads (
+            path TEXT PRIMARY KEY,
+            source_url TEXT NOT NULL,
+            folder TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            backend TEXT NOT NULL,
+            downloaded_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO downloads(path, source_url, folder, size_bytes, backend, downloaded_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(path) DO UPDATE SET
+            source_url=excluded.source_url,
+            folder=excluded.folder,
+            size_bytes=excluded.size_bytes,
+            backend=excluded.backend,
+            downloaded_at=excluded.downloaded_at
+        """,
+        (
+            relative_path,
+            safe_url,
+            folder,
+            int(size_bytes),
+            backend,
+            datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        ),
+    )
+    connection.commit()
+finally:
+    connection.close()
+os.chmod(registry_path, 0o600)
+PY
+}
+
 download_model() {
     local supplied_url=${1:-}
     local forced_folder=${2:-}
@@ -664,6 +730,9 @@ download_model() {
         fi
     fi
     mv -f -- "$temp_file" "$destination"
+    if ! record_model_download "$destination" "$url" "$dir" "$final_size" "$transfer_backend"; then
+        warn "Модель установлена, но запись в реестр загрузок не удалась."
+    fi
     printf '\n%b\n' "${GREEN}Модель успешно установлена.${NC}"
     printf '  Тип/папка:      %s\n' "$dir"
     printf '  Размер:         %s\n' "$(format_bytes "$final_size")"
