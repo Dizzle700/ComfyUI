@@ -104,13 +104,123 @@ archive_jobs = {
     "workspace": {"state": "idle", "path": None, "message": "", "started": 0.0},
 }
 
+# Прогресс скачивания моделей (визуальный индикатор)
+_dl_progress = {
+    "active": False,
+    "mode": "",
+    "started": 0.0,
+    "total": 0,
+    "completed": 0,
+    "failed": 0,
+    "last_line": "",
+}
+_dl_progress_lock = threading.Lock()
+
+
+def set_download_progress(**kwargs):
+    with _dl_progress_lock:
+        _dl_progress.update(kwargs)
+
+
+def reset_download_progress():
+    with _dl_progress_lock:
+        _dl_progress.update(
+            active=False, mode="", started=0.0,
+            total=0, completed=0, failed=0, last_line="",
+        )
+
+
 def add_download_log(text):
     with download_lock:
         download_logs.append(text)
+    with _dl_progress_lock:
+        _dl_progress["last_line"] = text
 
 def get_download_logs():
     with download_lock:
         return "\n".join(download_logs)
+
+
+def _escape_html(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def get_download_progress_html():
+    """Возвращает HTML-виджет с текущим состоянием загрузки моделей."""
+    with _dl_progress_lock:
+        state = dict(_dl_progress)
+
+    style_base = (
+        "padding:12px;border-radius:8px;"
+        "background:var(--background-fill-secondary);"
+        "border:1px solid var(--border-color-primary)"
+    )
+    pulse_css = (
+        "<style>"
+        "@keyframes dlpulse{0%,100%{opacity:1}50%{opacity:.4}}"
+        "@keyframes dlslide{0%{margin-left:0}50%{margin-left:70%}100%{margin-left:0}}"
+        "</style>"
+    )
+
+    if not state["active"]:
+        if download_job_lock.locked():
+            return (
+                f'<div style="{style_base}">'
+                '<div style="display:flex;align-items:center;gap:8px">'
+                '<div style="width:12px;height:12px;border-radius:50%;'
+                'background:#f59e0b;animation:dlpulse 1.5s infinite"></div>'
+                '<span>\u23f3 Подготовка загрузки\u2026</span></div>'
+                f'{pulse_css}</div>'
+            )
+        return (
+            f'<div style="{style_base}">'
+            '<div style="display:flex;align-items:center;gap:8px">'
+            '<div style="width:12px;height:12px;border-radius:50%;background:#6b7280"></div>'
+            '<span>\U0001f4a4 Нет активных загрузок</span></div></div>'
+        )
+
+    elapsed = time.time() - state["started"] if state["started"] else 0
+    elapsed_str = format_elapsed_time(elapsed)
+
+    if state["mode"] == "batch" and state["total"] > 0:
+        done = state["completed"] + state["failed"]
+        pct = done / state["total"] * 100
+        title = f"\U0001f4e6 Пакетная загрузка: {done}/{state['total']}"
+        if state["failed"]:
+            title += f" (ошибок: {state['failed']})"
+        bar = (
+            '<div style="width:100%;height:8px;background:var(--border-color-primary);'
+            'border-radius:4px;overflow:hidden;margin:8px 0">'
+            f'<div style="width:{pct:.1f}%;height:100%;'
+            'background:linear-gradient(90deg,#f97316,#fb923c);border-radius:4px;'
+            'transition:width .5s ease"></div></div>'
+        )
+    else:
+        title = "\u2b07\ufe0f Загрузка модели"
+        bar = (
+            '<div style="width:100%;height:8px;background:var(--border-color-primary);'
+            'border-radius:4px;overflow:hidden;margin:8px 0">'
+            '<div style="width:30%;height:100%;'
+            'background:linear-gradient(90deg,#f97316,#fb923c);border-radius:4px;'
+            'animation:dlslide 1.5s ease-in-out infinite"></div></div>'
+        )
+
+    last = _escape_html(state["last_line"])
+    if len(last) > 150:
+        last = last[:147] + "\u2026"
+
+    return (
+        f'<div style="{style_base}">'
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
+        '<div style="width:12px;height:12px;border-radius:50%;background:#22c55e;'
+        'animation:dlpulse 1.5s infinite"></div>'
+        f'<strong>{title}</strong>'
+        f'<span style="margin-left:auto;color:var(--body-text-color-subdued)">\u23f1 {elapsed_str}</span>'
+        f'</div>{bar}'
+        f'<div style="font-size:.85em;color:var(--body-text-color-subdued);'
+        f'word-break:break-all">{last}</div>'
+        f'{pulse_css}</div>'
+    )
 
 # Устанавливаем пакеты тем же Python, которым запущена панель.
 def build_pip_cmd(*args):
@@ -746,11 +856,16 @@ def run_download_model(url, folder, filename):
         add_download_log(f"--- Загрузка завершена с кодом {proc.returncode} ---")
 
     def worker():
+        set_download_progress(
+            active=True, mode="single",
+            started=time.time(), last_line="",
+        )
         try:
             download_worker()
         except Exception as exc:
             add_download_log(f"Ошибка фоновой загрузки: {exc}")
         finally:
+            reset_download_progress()
             download_job_lock.release()
 
     try:
@@ -867,6 +982,8 @@ def run_parallel_batch_download(list_path, parallel_count):
                     results["ok"] += 1
                 else:
                     results["failed"] += 1
+                _prog_ok, _prog_fail = results["ok"], results["failed"]
+            set_download_progress(completed=_prog_ok, failed=_prog_fail)
             add_download_log(f"{prefix}Завершено с кодом {return_code}")
             tasks.task_done()
 
@@ -896,6 +1013,18 @@ def run_download_batch(txt_file, parallel_count):
         add_download_log(f"TXT: {list_path}")
         parallel = max(1, int(parallel_count or 1))
 
+        try:
+            entry_count = len(read_batch_download_entries(list_path))
+        except Exception:
+            entry_count = 0
+        set_download_progress(
+            active=True,
+            mode="batch" if parallel > 1 and entry_count > 0 else "single",
+            started=time.time(),
+            total=entry_count if parallel > 1 else 0,
+            completed=0, failed=0, last_line="",
+        )
+
         add_download_log("Режим: автоопределение папок; построчные флаги --vae/--loras/--checkpoints/--folder поддерживаются")
         env, hf_token, civitai_token = build_downloader_env()
         add_download_log(f"Hugging Face token: {'настроен' if hf_token else 'не настроен'}")
@@ -915,6 +1044,7 @@ def run_download_batch(txt_file, parallel_count):
         except Exception as exc:
             add_download_log(f"Ошибка пакетной загрузки: {exc}")
         finally:
+            reset_download_progress()
             download_job_lock.release()
 
     try:
@@ -1159,6 +1289,117 @@ def delete_all_registered_models(confirmed, delete_hf_cache):
         rows,
         False,
     )
+
+# --- Вкладка "Мои загрузки" -------------------------------------------------
+
+def list_my_downloads():
+    """Возвращает только модели из реестра загрузок (скачанные через UI/загрузчик)."""
+    registry = read_model_registry()
+    models_root = os.path.join(COMFY_DIR, "models")
+    rows = []
+    for relative_path, record in registry.items():
+        full_path = os.path.join(models_root, relative_path)
+        on_disk = os.path.isfile(full_path) and not os.path.islink(full_path)
+        try:
+            disk_size = os.path.getsize(full_path) if on_disk else record["size_bytes"]
+        except OSError:
+            disk_size = record["size_bytes"]
+        rows.append([
+            relative_path,
+            "✅ На диске" if on_disk else "❌ Отсутствует",
+            format_file_size(disk_size),
+            record["source_url"],
+            record["downloaded_at"],
+        ])
+    rows.sort(key=lambda r: r[4], reverse=True)
+    total_size = sum(
+        os.path.getsize(os.path.join(models_root, r[0]))
+        for r in rows
+        if os.path.isfile(os.path.join(models_root, r[0]))
+    )
+    summary = (
+        f"Загружено моделей: **{len(rows)}** · "
+        f"Занимают на диске: **{format_file_size(total_size)}**"
+    )
+    return rows, summary
+
+
+def select_my_download(table_data, evt: gr.SelectData):
+    row_index = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+    return table_cell_value(table_data, row_index)
+
+
+def delete_my_download(relative_path, delete_hf_cache):
+    """Удалить одну загруженную модель с диска и из реестра."""
+    if not relative_path:
+        rows, summary = list_my_downloads()
+        return "Выберите модель из таблицы.", rows, summary, ""
+    if download_job_lock.locked():
+        rows, summary = list_my_downloads()
+        return "Дождитесь завершения текущей загрузки.", rows, summary, relative_path
+    try:
+        registry = read_model_registry()
+        record = registry.get(relative_path)
+        target_path, normalized = resolve_model_inventory_path(relative_path)
+        removed_file = False
+        if os.path.isfile(target_path) and not os.path.islink(target_path):
+            os.remove(target_path)
+            removed_file = True
+        remove_registry_record(normalized)
+        cache_removed = bool(
+            delete_hf_cache and record and remove_huggingface_repo_cache(record["source_url"])
+        )
+        rows, summary = list_my_downloads()
+        details = []
+        if removed_file:
+            details.append("файл удалён с диска")
+        else:
+            details.append("запись очищена; файла уже не было")
+        if cache_removed:
+            details.append("HF cache очищен")
+        return f"✅ `{normalized}`: {', '.join(details)}.", rows, summary, ""
+    except Exception as exc:
+        rows, summary = list_my_downloads()
+        return f"Ошибка удаления: {exc}", rows, summary, relative_path
+
+
+def delete_all_my_downloads(confirmed, delete_hf_cache):
+    """Удалить все загруженные модели с диска и очистить реестр."""
+    if not confirmed:
+        rows, summary = list_my_downloads()
+        return "⚠️ Сначала поставьте галочку подтверждения.", rows, summary, False
+    if download_job_lock.locked():
+        rows, summary = list_my_downloads()
+        return "Дождитесь завершения текущей загрузки.", rows, summary, False
+    registry = read_model_registry()
+    removed = 0
+    failed = 0
+    source_urls = set()
+    for relative_path, record in registry.items():
+        try:
+            target_path, normalized = resolve_model_inventory_path(relative_path)
+            if os.path.isfile(target_path) and not os.path.islink(target_path):
+                os.remove(target_path)
+                removed += 1
+            remove_registry_record(normalized)
+            source_urls.add(record["source_url"])
+        except Exception:
+            failed += 1
+    caches_removed = 0
+    if delete_hf_cache:
+        for source_url in source_urls:
+            try:
+                caches_removed += int(remove_huggingface_repo_cache(source_url))
+            except OSError:
+                failed += 1
+    rows, summary = list_my_downloads()
+    return (
+        f"Удалено файлов: **{removed}** · HF caches: **{caches_removed}** · ошибок: **{failed}**",
+        rows,
+        summary,
+        False,
+    )
+
 
 # Полный файловый менеджер для Gradio Control Panel.
 def normalize_workspace_path(path):
@@ -1550,48 +1791,93 @@ def list_output_files():
     display_rows = [row[:4] for row in rows]
     return display_rows, f"Найдено файлов: **{len(display_rows)}**"
 
+def build_output_gallery():
+    """Собирает список (path, caption) для Gradio Gallery — изображения и видео."""
+    if not os.path.isdir(OUTPUT_DIR):
+        return [], [], "Папка output пока не создана."
+    items = []
+    for root, _, files in os.walk(OUTPUT_DIR):
+        for file_name in files:
+            full_path = os.path.join(root, file_name)
+            if os.path.islink(full_path) or not os.path.isfile(full_path):
+                continue
+            extension = os.path.splitext(file_name)[1].lower()
+            if extension not in OUTPUT_IMAGE_EXTENSIONS:
+                continue
+            try:
+                stat = os.stat(full_path)
+            except OSError:
+                continue
+            relative_path = os.path.relpath(full_path, OUTPUT_DIR)
+            caption = f"{relative_path}  ({format_file_size(stat.st_size)})"
+            items.append((full_path, caption, stat.st_mtime))
+    items.sort(key=lambda item: (-item[2], item[1].lower()))
+    gallery_items = [(item[0], item[1]) for item in items]
 
-def get_output_preview_data(relative_path):
-    target_path, normalized = resolve_output_path(relative_path)
-    if not os.path.isfile(target_path):
-        raise ValueError("Файл не найден")
-    kind = output_file_kind(target_path)
-    text = ""
-    if kind == "Текст":
-        max_bytes = 512 * 1024
-        with open(target_path, "rb") as stream:
-            content = stream.read(max_bytes + 1)
-        truncated = len(content) > max_bytes
-        text = content[:max_bytes].decode("utf-8", errors="replace")
-        if truncated:
-            text += "\n\n… preview ограничен 512 KiB"
-    return kind, target_path, text, f"Открыт: `{normalized}`"
+    video_items = []
+    for root, _, files in os.walk(OUTPUT_DIR):
+        for file_name in files:
+            full_path = os.path.join(root, file_name)
+            if os.path.islink(full_path) or not os.path.isfile(full_path):
+                continue
+            extension = os.path.splitext(file_name)[1].lower()
+            if extension not in OUTPUT_VIDEO_EXTENSIONS:
+                continue
+            try:
+                stat = os.stat(full_path)
+            except OSError:
+                continue
+            relative_path = os.path.relpath(full_path, OUTPUT_DIR)
+            video_items.append([
+                relative_path,
+                format_file_size(stat.st_size),
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+                stat.st_mtime,
+            ])
+    video_items.sort(key=lambda row: (-row[3], row[0].lower()))
+    video_display = [row[:3] for row in video_items]
+
+    total = len(gallery_items) + len(video_display)
+    status = f"Изображений: **{len(gallery_items)}** · Видео: **{len(video_display)}** · Всего файлов: **{total}**"
+    return gallery_items, video_display, status
 
 
-def render_output_preview(relative_path):
+def gallery_select_output(evt: gr.SelectData):
+    """Обработчик клика по элементу галереи — возвращает путь для скачивания."""
+    caption = evt.value.get("caption", "") if isinstance(evt.value, dict) else ""
+    if not caption:
+        return "", gr.Image(value=None, visible=False), "Файл не определён."
+    relative_path = caption.split("  (")[0].strip()
     try:
-        kind, target_path, text, status = get_output_preview_data(relative_path)
-    except Exception as exc:
+        target_path, _ = resolve_output_path(relative_path)
+        if not os.path.isfile(target_path):
+            return "", gr.Image(value=None, visible=False), "Файл не найден."
         return (
-            gr.Image(value=None, visible=False),
-            gr.Video(value=None, visible=False),
-            gr.Audio(value=None, visible=False),
-            gr.TextArea(value="", visible=False),
-            f"Ошибка preview: {exc}",
+            relative_path,
+            gr.Image(value=target_path, visible=True),
+            f"Выбрано: `{relative_path}`",
         )
-    return (
-        gr.Image(value=target_path if kind == "Изображение" else None, visible=kind == "Изображение"),
-        gr.Video(value=target_path if kind == "Видео" else None, visible=kind == "Видео"),
-        gr.Audio(value=target_path if kind == "Аудио" else None, visible=kind == "Аудио"),
-        gr.TextArea(value=text if kind == "Текст" else "", visible=kind == "Текст", lines=18),
-        status if kind != "Файл" else f"{status} Preview для этого формата недоступен.",
-    )
+    except Exception as exc:
+        return "", gr.Image(value=None, visible=False), f"Ошибка: {exc}"
 
 
-def select_output_file(table_data, evt: gr.SelectData):
+def video_table_select_output(table_data, evt: gr.SelectData):
+    """Обработчик клика по строке таблицы видео."""
     row_index = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
-    selected = table_cell_value(table_data, row_index)
-    return (selected, *render_output_preview(selected))
+    relative_path = table_cell_value(table_data, row_index)
+    if not relative_path:
+        return "", gr.Video(value=None, visible=False), "Файл не определён."
+    try:
+        target_path, _ = resolve_output_path(relative_path)
+        if not os.path.isfile(target_path):
+            return relative_path, gr.Video(value=None, visible=False), "Видео не найдено."
+        return (
+            relative_path,
+            gr.Video(value=target_path, visible=True),
+            f"Выбрано видео: `{relative_path}`",
+        )
+    except Exception as exc:
+        return "", gr.Video(value=None, visible=False), f"Ошибка: {exc}"
 
 
 def download_output_selected(relative_path):
@@ -1935,32 +2221,44 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                 lines=15
             )
 
-        # Вкладка 2: Output browser
+        # Вкладка 2: Output — Галерея изображений и видео
         with gr.TabItem("🎞️ Output"):
-            initial_output_rows, initial_output_status = list_output_files()
+            initial_gallery, initial_videos, initial_gallery_status = build_output_gallery()
+
             with gr.Row():
-                btn_output_refresh = gr.Button("🔄 Обновить список", variant="secondary")
-                btn_output_open = gr.Button("👁️ Открыть", variant="secondary")
-                btn_output_download_selected = gr.Button("⬇️ Скачать выбранный", variant="primary")
+                btn_output_refresh = gr.Button("🔄 Обновить галерею", variant="secondary")
+                btn_output_download_selected = gr.Button("⬇️ Скачать выбранный файл", variant="primary")
                 btn_output_download_all = gr.Button("📦 Скачать всё ZIP", variant="primary")
 
-            output_files_table = gr.Dataframe(
-                headers=["Путь", "Тип", "Размер", "Изменён"],
-                datatype=["str", "str", "str", "str"],
-                value=initial_output_rows,
-                label="Файлы ComfyUI/output — новые сверху",
+            output_listing_status = gr.Markdown(initial_gallery_status)
+
+            gr.Markdown("### 🖼️ Изображения")
+            output_gallery = gr.Gallery(
+                value=initial_gallery,
+                label="Результаты генерации — новые первыми",
+                columns=4,
+                rows=3,
+                height="auto",
+                object_fit="cover",
+                show_label=False,
+                allow_preview=True,
+                preview=True,
+            )
+
+            selected_output_file = gr.Textbox(label="Выбранный файл", interactive=False)
+            output_preview_full = gr.Image(label="Полный размер", visible=False, interactive=False)
+            output_preview_status = gr.Markdown("Нажмите на изображение в галерее для выбора.")
+
+            gr.Markdown("### 🎬 Видео")
+            output_video_table = gr.Dataframe(
+                headers=["Путь", "Размер", "Дата"],
+                datatype=["str", "str", "str"],
+                value=initial_videos,
+                label="Видео-файлы — новые сверху",
                 interactive=False,
                 type="array",
             )
-            selected_output_file = gr.Textbox(label="Выбранный файл", interactive=False)
-            output_listing_status = gr.Markdown(initial_output_status)
-
-            gr.Markdown("### Preview")
-            output_preview_image = gr.Image(label="Изображение", visible=False, interactive=False)
-            output_preview_video = gr.Video(label="Видео", visible=False, interactive=False)
-            output_preview_audio = gr.Audio(label="Аудио", visible=False, interactive=False)
-            output_preview_text = gr.TextArea(label="Текст", visible=False, interactive=False, lines=18)
-            output_preview_status = gr.Markdown("Выберите файл в таблице.")
+            output_preview_video = gr.Video(label="Предпросмотр видео", visible=False, interactive=False)
 
             with gr.Row():
                 output_selected_download_file = gr.DownloadButton(
@@ -2034,6 +2332,7 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
             batch_download_status = gr.Markdown("")
             
             gr.Markdown("### 📋 Прогресс и логи скачивания")
+            download_progress_indicator = gr.HTML(value=get_download_progress_html())
             btn_refresh_dl = gr.Button("🔄 Обновить лог скачивания")
             dl_log_output = gr.TextArea(
                 label="Лог comfy_model_downloader.sh", 
@@ -2188,6 +2487,45 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                 lines=15
             )
 
+        # Вкладка 7: Мои загрузки
+        with gr.TabItem("📋 Мои загрузки"):
+            gr.Markdown(
+                "### Модели, скачанные через загрузчик\n"
+                "Здесь показаны только те модели, которые были загружены через панель. "
+                "Вы можете удалить любую модель в один клик — файл будет удалён с диска, "
+                "а запись убрана из реестра."
+            )
+            my_dl_initial_rows, my_dl_initial_summary = list_my_downloads()
+            with gr.Row():
+                btn_my_dl_refresh = gr.Button("🔄 Обновить список", variant="secondary")
+                btn_my_dl_delete = gr.Button("❌ Удалить выбранную модель", variant="stop")
+            my_dl_table = gr.Dataframe(
+                headers=["Путь (models/…)", "Статус", "Размер", "Источник", "Дата загрузки"],
+                datatype=["str", "str", "str", "str", "str"],
+                value=my_dl_initial_rows,
+                label="Загруженные модели — новые сверху",
+                interactive=False,
+                type="array",
+            )
+            my_dl_selected = gr.Textbox(label="Выбранная модель", interactive=False)
+            my_dl_hf_cache = gr.Checkbox(
+                label="Также удалить HF cache репозитория (освобождает место на диске)",
+                value=True,
+            )
+            my_dl_status = gr.Markdown(my_dl_initial_summary)
+
+            gr.Markdown("---")
+            gr.Markdown("### 🗑️ Массовое удаление")
+            my_dl_confirm_all = gr.Checkbox(
+                label="Подтверждаю: удалить ВСЕ загруженные модели с диска",
+                value=False,
+            )
+            btn_my_dl_delete_all = gr.Button(
+                "🗑️ Удалить все загруженные модели",
+                variant="stop",
+            )
+            my_dl_mass_status = gr.Markdown("")
+
     # Автообновление статуса и ресурсов каждые 5 секунд
     auto_refresh_timer = gr.Timer(value=5)
     archive_refresh_timer = gr.Timer(value=2)
@@ -2198,6 +2536,23 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
         return status, pid, stats
 
     auto_refresh_timer.tick(periodic_status_update, outputs=[status_indicator, pid_indicator, system_stats_box])
+
+    # Автообновление логов и прогресса скачивания
+    log_refresh_timer = gr.Timer(value=3)
+
+    def periodic_log_update(num_lines):
+        return (
+            read_logs(num_lines),
+            get_download_logs(),
+            get_node_logs(),
+            get_download_progress_html(),
+        )
+
+    log_refresh_timer.tick(
+        periodic_log_update,
+        inputs=[lines_slider],
+        outputs=[log_output, dl_log_output, node_log_output, download_progress_indicator],
+    )
 
     def refresh_archive_jobs():
         output_path, output_status = get_archive_job_result("output")
@@ -2238,33 +2593,23 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
         outputs=[output_download_file, output_download_status],
     )
 
-    # Output browser
+    # Output gallery
+    def refresh_output_gallery():
+        gallery, videos, status = build_output_gallery()
+        return gallery, videos, status
+
     btn_output_refresh.click(
-        list_output_files,
-        outputs=[output_files_table, output_listing_status],
+        refresh_output_gallery,
+        outputs=[output_gallery, output_video_table, output_listing_status],
     )
-    output_files_table.select(
-        select_output_file,
-        inputs=[output_files_table],
-        outputs=[
-            selected_output_file,
-            output_preview_image,
-            output_preview_video,
-            output_preview_audio,
-            output_preview_text,
-            output_preview_status,
-        ],
+    output_gallery.select(
+        gallery_select_output,
+        outputs=[selected_output_file, output_preview_full, output_preview_status],
     )
-    btn_output_open.click(
-        render_output_preview,
-        inputs=[selected_output_file],
-        outputs=[
-            output_preview_image,
-            output_preview_video,
-            output_preview_audio,
-            output_preview_text,
-            output_preview_status,
-        ],
+    output_video_table.select(
+        video_table_select_output,
+        inputs=[output_video_table],
+        outputs=[selected_output_file, output_preview_video, output_preview_status],
     )
     btn_output_download_selected.click(
         download_output_selected,
@@ -2421,7 +2766,28 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
         outputs=[node_install_status]
     )
     btn_refresh_node_log.click(get_node_logs, outputs=[node_log_output])
-    
+
+    # Мои загрузки
+    my_dl_table.select(
+        select_my_download,
+        inputs=[my_dl_table],
+        outputs=[my_dl_selected],
+    )
+    btn_my_dl_refresh.click(
+        list_my_downloads,
+        outputs=[my_dl_table, my_dl_status],
+    )
+    btn_my_dl_delete.click(
+        delete_my_download,
+        inputs=[my_dl_selected, my_dl_hf_cache],
+        outputs=[my_dl_mass_status, my_dl_table, my_dl_status, my_dl_selected],
+    )
+    btn_my_dl_delete_all.click(
+        delete_all_my_downloads,
+        inputs=[my_dl_confirm_all, my_dl_hf_cache],
+        outputs=[my_dl_mass_status, my_dl_table, my_dl_status, my_dl_confirm_all],
+    )
+
     # Инициализация при загрузке страницы
     demo.load(
         fn=refresh_dashboard, 
