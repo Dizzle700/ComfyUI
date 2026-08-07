@@ -96,6 +96,12 @@ download_logs = deque(maxlen=1000)
 download_lock = threading.Lock()
 download_job_lock = threading.Lock()
 
+# Состояние отмены загрузок
+active_download_processes = []
+active_download_processes_lock = threading.Lock()
+download_cancelled = False
+
+
 # Фоновые задачи подготовки файлов для скачивания.
 archive_job_lock = threading.Lock()
 archive_jobs = {
@@ -821,6 +827,10 @@ def run_download_model(url, folder, filename):
     if not download_job_lock.acquire(blocking=False):
         return "Другая загрузка уже выполняется. Дождитесь ее завершения."
     
+    global download_cancelled
+    with active_download_processes_lock:
+        download_cancelled = False
+    
     def download_worker():
         add_download_log(f"--- Старт загрузки: {time.strftime('%H:%M:%S')} ---")
         add_download_log(f"Ссылка: {url}")
@@ -836,24 +846,8 @@ def run_download_model(url, folder, filename):
         add_download_log(f"Hugging Face token: {'настроен' if hf_token else 'не настроен'}")
         add_download_log(f"Civitai token: {'настроен' if civitai_token else 'не настроен'}")
         
-        proc = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1
-        )
-        
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                break
-            
-            add_download_log(line.strip())
-                
-        proc.wait()
-        add_download_log(f"--- Загрузка завершена с кодом {proc.returncode} ---")
+        return_code = stream_download_process(cmd, env)
+        add_download_log(f"--- Загрузка завершена с кодом {return_code} ---")
 
     def worker():
         set_download_progress(
@@ -925,6 +919,12 @@ def read_batch_download_entries(list_path):
     return entries
 
 def stream_download_process(cmd, env, log_prefix=""):
+    global download_cancelled
+    with active_download_processes_lock:
+        if download_cancelled:
+            add_download_log(f"{log_prefix}Загрузка отменена до старта.")
+            return -1
+
     proc = subprocess.Popen(
         cmd,
         env=env,
@@ -932,15 +932,25 @@ def stream_download_process(cmd, env, log_prefix=""):
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        preexec_fn=os.setsid
     )
-    while True:
-        line = proc.stdout.readline()
-        if not line:
-            break
-        clean_line = line.strip()
-        if clean_line:
-            add_download_log(f"{log_prefix}{clean_line}")
-    proc.wait()
+
+    with active_download_processes_lock:
+        active_download_processes.append(proc)
+
+    try:
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            clean_line = line.strip()
+            if clean_line:
+                add_download_log(f"{log_prefix}{clean_line}")
+    finally:
+        with active_download_processes_lock:
+            if proc in active_download_processes:
+                active_download_processes.remove(proc)
+        proc.wait()
     return proc.returncode
 
 def run_parallel_batch_download(list_path, parallel_count):
@@ -964,6 +974,9 @@ def run_parallel_batch_download(list_path, parallel_count):
     def worker(worker_id):
         env, _, _ = build_downloader_env()
         while True:
+            with active_download_processes_lock:
+                if download_cancelled:
+                    return
             try:
                 line_number, url, folder = tasks.get_nowait()
             except queue.Empty:
@@ -1007,6 +1020,10 @@ def run_download_batch(txt_file, parallel_count):
 
     if not download_job_lock.acquire(blocking=False):
         return "Другая загрузка уже выполняется. Дождитесь ее завершения."
+
+    global download_cancelled
+    with active_download_processes_lock:
+        download_cancelled = False
 
     def batch_worker():
         add_download_log(f"--- Старт пакетной загрузки: {time.strftime('%H:%M:%S')} ---")
@@ -1053,6 +1070,24 @@ def run_download_batch(txt_file, parallel_count):
         download_job_lock.release()
         raise
     return "Пакетная загрузка запущена в фоновом режиме. Лог ниже."
+
+def cancel_download():
+    global download_cancelled
+    with active_download_processes_lock:
+        download_cancelled = True
+        count = len(active_download_processes)
+        if count == 0:
+            return "Нет активных загрузок для отмены."
+        
+        for proc in active_download_processes:
+            try:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGTERM)
+                add_download_log(f"--- Отправлен сигнал отмены группе процессов {pgid} (PID {proc.pid}) ---")
+            except Exception as e:
+                add_download_log(f"Не удалось остановить процесс {proc.pid}: {e}")
+        
+        return f"Запущено прерывание активных загрузок (остановлено процессов: {count})."
 
 # Файловый менеджер
 def list_model_folders():
@@ -2304,7 +2339,9 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                 label="Целевая папка (models/...)"
             )
             
-            btn_download = gr.Button("⬇️ Начать загрузку", variant="primary")
+            with gr.Row():
+                btn_download = gr.Button("⬇️ Начать загрузку", variant="primary")
+                btn_cancel_download1 = gr.Button("⏹️ Отменить загрузку", variant="stop")
             download_status = gr.Markdown("")
 
             gr.Markdown("---")
@@ -2329,6 +2366,7 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
                     label="Параллельных загрузок",
                 )
                 btn_batch_download = gr.Button("⬇️ Скачать список", variant="primary")
+                btn_cancel_download2 = gr.Button("⏹️ Отменить загрузку", variant="stop")
             batch_download_status = gr.Markdown("")
             
             gr.Markdown("### 📋 Прогресс и логи скачивания")
@@ -2645,6 +2683,19 @@ with gr.Blocks(title="ComfyUI RunPod Control Panel", theme=gr.themes.Default(pri
         outputs=[batch_download_status],
     )
     btn_refresh_dl.click(get_download_logs, outputs=[dl_log_output])
+
+    def handle_cancel():
+        msg = cancel_download()
+        return msg, msg
+
+    btn_cancel_download1.click(
+        handle_cancel,
+        outputs=[download_status, batch_download_status]
+    )
+    btn_cancel_download2.click(
+        handle_cancel,
+        outputs=[download_status, batch_download_status]
+    )
 
     # Файловый менеджер
     btn_inventory_refresh.click(
