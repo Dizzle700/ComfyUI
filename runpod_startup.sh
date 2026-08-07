@@ -5,6 +5,67 @@ set -Eeuo pipefail
 # Определяем директорию, в которой находится этот скрипт.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SECRET_ENV_FILE="${COMFY_SECRET_FILE:-$SCRIPT_DIR/.env.secrets}"
+MODEL_PACKAGES=''
+
+usage() {
+    cat <<'EOF'
+Использование:
+  runpod_startup.sh [--models ИМЯ_ПАКЕТА]...
+
+Опции:
+  --models ИМЯ       Скачать модели из пакета #ИМЯ в KRea.txt до запуска
+                      панели. Несколько имен укажите через запятую или
+                      повторите опцию.
+  --help, -h          Показать эту справку.
+
+Пример:
+  runpod_startup.sh --models Krea --models Ernie
+EOF
+}
+
+add_model_package() {
+    local package
+    local -a packages
+    local IFS=','
+
+    read -r -a packages <<< "$1"
+    for package in "${packages[@]}"; do
+        if [[ ! "$package" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "Ошибка: недопустимое имя пакета моделей: $package" >&2
+            exit 2
+        fi
+        if [[ -n "$MODEL_PACKAGES" ]]; then
+            MODEL_PACKAGES+=","
+        fi
+        MODEL_PACKAGES+="$package"
+    done
+}
+
+while (( $# > 0 )); do
+    case "$1" in
+        --models)
+            if (( $# < 2 )); then
+                echo "Ошибка: после --models укажите имя пакета." >&2
+                exit 2
+            fi
+            add_model_package "$2"
+            shift
+            ;;
+        --models=*) add_model_package "${1#--models=}" ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Ошибка: неизвестная опция: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+export COMFY_MODEL_PACKAGES="$MODEL_PACKAGES"
 
 load_secret_file() {
     local key value

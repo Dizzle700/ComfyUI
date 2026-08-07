@@ -1,0 +1,13 @@
+#Krea
+https://huggingface.co/Comfy-Org/Krea-2/blob/main/diffusion_models/krea2_turbo_fp8_scaled.safetensors --diffusion_models
+https://huggingface.co/Comfy-Org/Krea-2/blob/main/loras/krea2_warmpastel.safetensors --loras
+https://huggingface.co/Comfy-Org/Krea-2/blob/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors --text_encoders
+https://huggingface.co/Comfy-Org/Krea-2/blob/main/vae/qwen_image_vae.safetensors --vae
+
+#Ernie
+https://huggingface.co/Comfy-Org/ERNIE-Image/blob/main/diffusion_models/ernie-image.safetensors --diffusion_models
+https://huggingface.co/Comfy-Org/ERNIE-Image/blob/main/text_encoders/ministral-3-3b.safetensors --text_encoders
+https://huggingface.co/Comfy-Org/ERNIE-Image/blob/main/text_encoders/ernie-image-prompt-enhancer.safetensors --text_encoders
+
+
+

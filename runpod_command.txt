@@ -26,14 +26,26 @@
 #    приоритет над значениями из файла. Путь можно изменить через COMFY_SECRET_FILE.
 # 6. Ускоренная загрузка Hugging Face через hf-xet включена автоматически:
 #    HF_XET_HIGH_PERFORMANCE=1. При необходимости ее можно отключить значением 0.
-# 7. Output ZIP создается в фоне в /workspace/.comfy-control-downloads.
+# 7. Для загрузки моделей до запуска панели добавьте один или несколько флагов:
+#    --models Krea
+#    --models Krea --models Ernie
+#    --models Krea,Ernie
+#    Название флага выбирает раздел #ИМЯ из KRea.txt; уже скачанные файлы пропускаются.
+# 8. Output ZIP создается в фоне в /workspace/.comfy-control-downloads.
 #    MP4/MKV/JPEG/PNG и другие уже сжатые файлы добавляются без повторного сжатия.
 #    Готовые файлы старше 24 часов удаляются при старте панели; срок можно изменить:
 #    COMFY_DOWNLOAD_TTL_HOURS=48
 
 
 
+# Обычный запуск без предзагрузки моделей:
 bash -lc "cd /workspace && if [ ! -d runpod-scripts/.git ]; then git clone --depth 1 https://github.com/Dizzle700/ComfyUI.git runpod-scripts; else git -C runpod-scripts pull --ff-only; fi && bash runpod-scripts/runpod_startup.sh"
+
+# Запуск с предзагрузкой только моделей из раздела #Krea:
+bash -lc "cd /workspace && if [ ! -d runpod-scripts/.git ]; then git clone --depth 1 https://github.com/Dizzle700/ComfyUI.git runpod-scripts; else git -C runpod-scripts pull --ff-only; fi && bash runpod-scripts/runpod_startup.sh --models Krea"
+
+# Запуск с двумя пакетами: #Krea и #Ernie:
+bash -lc "cd /workspace && if [ ! -d runpod-scripts/.git ]; then git clone --depth 1 https://github.com/Dizzle700/ComfyUI.git runpod-scripts; else git -C runpod-scripts pull --ff-only; fi && bash runpod-scripts/runpod_startup.sh --models Krea --models Ernie"
 
 # Значение для отдельного поля HTTP Ports в шаблоне RunPod:
 7860,8188

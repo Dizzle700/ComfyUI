@@ -108,6 +108,25 @@ raise SystemExit(0 if torch.version.cuda else 1)
 PY
 }
 
+download_startup_model_packages() {
+    local packages=${COMFY_MODEL_PACKAGES:-}
+    local package_file="$SCRIPT_DIR/KRea.txt"
+
+    [[ -n "$packages" ]] || return 0
+    if [[ ! -r "$package_file" ]]; then
+        error "Файл пакетов моделей не найден: $package_file"
+        return 0
+    fi
+
+    info "Загружаем пакеты моделей из KRea.txt: $packages"
+    if ! COMFY_DIR="$COMFY_DIR" bash "$SCRIPT_DIR/comfy_model_downloader.sh" \
+        --batch "$package_file" --packages "$packages"; then
+        warn "Не все пакеты моделей скачались успешно. Панель будет запущена; проверьте лог выше."
+    else
+        success "Все запрошенные пакеты моделей подготовлены."
+    fi
+}
+
 # Клонируем или обновляем ComfyUI
 if [[ ! -d "$COMFY_DIR/.git" ]]; then
     info "Клонируем репозиторий ComfyUI..."
@@ -175,6 +194,12 @@ if [[ -f "$SCRIPT_DIR/pisa_sr.pkl" ]]; then
     mkdir -p "$COMFY_DIR/models/loras"
     cp "$SCRIPT_DIR/pisa_sr.pkl" "$COMFY_DIR/models/loras/pisa_sr.pkl"
 fi
+
+# Пакеты передаются из runpod_startup.sh через --models ИМЯ. Они выбираются
+# по заголовкам #ИМЯ внутри KRea.txt.
+# Здесь каталог ComfyUI и его models/ уже существуют, поэтому загрузчик может
+# корректно определить назначение каждой модели.
+download_startup_model_packages
 
 success "Автоматическая установка ComfyUI в Python-окружение RunPod завершена!"
 if [[ "$START_PANEL" == true ]]; then

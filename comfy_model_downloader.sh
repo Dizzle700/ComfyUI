@@ -740,10 +740,10 @@ download_model() {
 }
 
 download_batch() {
-    local list_file=${1:-} forced_folder=${2:-}
+    local list_file=${1:-} forced_folder=${2:-} packages=${3:-}
     local line url line_number=0 total=0 success_count=0 skipped_count=0 failed_count=0 status
-    local line_folder option i
-    local -a fields
+    local line_folder option i current_package requested selected
+    local -a fields requested_packages
 
     if [[ -z "$list_file" ]]; then
         read -r -e -p "Путь к TXT-файлу: " list_file || return 1
@@ -752,13 +752,40 @@ download_batch() {
     [[ -f "$list_file" ]] || { error "TXT-файл не найден: $list_file"; return 1; }
     [[ -r "$list_file" ]] || { error "Нет доступа на чтение: $list_file"; return 1; }
     [[ -z "$forced_folder" ]] || validate_model_folder "$forced_folder" || return 1
+    if [[ -n "$packages" ]]; then
+        IFS=',' read -r -a requested_packages <<< "$packages"
+        for requested in "${requested_packages[@]}"; do
+            [[ "$requested" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+                error "Недопустимое имя пакета: $requested"
+                return 1
+            }
+        done
+    fi
 
+    current_package=''
     while IFS= read -r line || [[ -n "$line" ]]; do
         line_number=$((line_number + 1))
         line=${line//$'\r'/}
         line=${line#"${line%%[![:space:]]*}"}
         line=${line%"${line##*[![:space:]]}"}
-        [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ -z "$line" ]] && continue
+        if [[ "$line" == \#* ]]; then
+            current_package=${line#\#}
+            current_package=${current_package#"${current_package%%[![:space:]]*}"}
+            current_package=${current_package%"${current_package##*[![:space:]]}"}
+            continue
+        fi
+        selected=true
+        if [[ -n "$packages" ]]; then
+            selected=false
+            for requested in "${requested_packages[@]}"; do
+                if [[ "${current_package,,}" == "${requested,,}" ]]; then
+                    selected=true
+                    break
+                fi
+            done
+        fi
+        [[ "$selected" == true ]] || continue
         fields=()
         read -r -a fields <<< "$line"
         [[ ${#fields[@]} -gt 0 ]] || continue
@@ -789,18 +816,44 @@ download_batch() {
         [[ -z "$line_folder" ]] || validate_model_folder "$line_folder" || return 1
         total=$((total + 1))
     done < "$list_file"
-    (( total > 0 )) || { error "В файле нет ссылок для загрузки."; return 1; }
+    if (( total == 0 )); then
+        if [[ -n "$packages" ]]; then
+            error "В пакетах '$packages' нет ссылок для загрузки. Проверьте заголовки #ИМЯ в TXT-файле."
+        else
+            error "В файле нет ссылок для загрузки."
+        fi
+        return 1
+    fi
 
     printf '\n%b\n' "${BLUE}Пакетная загрузка: $total моделей${NC}"
+    [[ -n "$packages" ]] && printf 'Выбранные пакеты: %s\n' "$packages"
     [[ -n "$forced_folder" ]] && printf 'Принудительная папка: models/%s\n' "$forced_folder"
 
     line_number=0
+    current_package=''
     while IFS= read -r line || [[ -n "$line" ]]; do
         line_number=$((line_number + 1))
         line=${line//$'\r'/}
         line=${line#"${line%%[![:space:]]*}"}
         line=${line%"${line##*[![:space:]]}"}
-        [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ -z "$line" ]] && continue
+        if [[ "$line" == \#* ]]; then
+            current_package=${line#\#}
+            current_package=${current_package#"${current_package%%[![:space:]]*}"}
+            current_package=${current_package%"${current_package##*[![:space:]]}"}
+            continue
+        fi
+        selected=true
+        if [[ -n "$packages" ]]; then
+            selected=false
+            for requested in "${requested_packages[@]}"; do
+                if [[ "${current_package,,}" == "${requested,,}" ]]; then
+                    selected=true
+                    break
+                fi
+            done
+        fi
+        [[ "$selected" == true ]] || continue
         fields=()
         read -r -a fields <<< "$line"
         url=${fields[0]}
@@ -909,6 +962,7 @@ print_usage() {
   comfy-model-downloader
   comfy-model-downloader --download [URL] [--folder ПАПКА] [--filename ИМЯ] [--yes]
   comfy-model-downloader --batch models.txt [--folder ПАПКА]
+  comfy-model-downloader --batch models.txt --packages Krea,Ernie
   comfy-model-downloader --batch models.txt --vae
   comfy-model-downloader --tokens
   comfy-model-downloader --install-global
@@ -917,7 +971,8 @@ print_usage() {
   --folder diffusion_models
   --diffusion_models
 
-TXT: одна прямая ссылка на строку. Пустые строки и строки с # пропускаются.
+TXT: одна прямая ссылка на строку. Пустые строки пропускаются. Строка #ИМЯ
+начинает пакет ИМЯ; --packages скачивает только модели из указанных пакетов.
 В строке можно указать папку:
   https://huggingface.co/.../model.safetensors
   https://huggingface.co/.../vae.safetensors --vae
@@ -930,7 +985,7 @@ EOF
 }
 
 run_cli() {
-    local action='' list_file='' forced_folder='' download_url='' download_filename='' assume_yes=false option
+    local action='' list_file='' forced_folder='' packages='' download_url='' download_filename='' assume_yes=false option
 
     while (( $# > 0 )); do
         option=$1
@@ -955,6 +1010,12 @@ run_cli() {
                 shift
                 ;;
             --folder=*) forced_folder=${option#--folder=} ;;
+            --packages)
+                (( $# > 1 )) || { error "После --packages укажите имена пакетов через запятую."; return 2; }
+                packages=$2
+                shift
+                ;;
+            --packages=*) packages=${option#--packages=} ;;
             --filename)
                 (( $# > 1 )) || { error "После --filename укажите имя файла."; return 2; }
                 download_filename=$2
@@ -987,7 +1048,7 @@ run_cli() {
     case "${action:-menu}" in
         menu) main ;;
         download) download_model "$download_url" "$forced_folder" false "$download_filename" "$assume_yes" ;;
-        batch) download_batch "$list_file" "$forced_folder" ;;
+        batch) download_batch "$list_file" "$forced_folder" "$packages" ;;
         tokens) configure_tokens ;;
         install) install_global_command ;;
     esac
