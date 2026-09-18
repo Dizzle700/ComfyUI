@@ -1,8 +1,51 @@
+# Python
 __pycache__/
 *.py[cod]
-logs.txt
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Environment and Secrets
 .env
-.env.secrets
-.env.secrets.*
+.env.*
+!.env.example
 !.env.secrets.example
+
+# Logs and debug files
+*.log
+logs.txt
+runpod_startup.log
+
+# Temporary archives and downloads
+*.tmp
+*.temp
+*.tar.gz
+*.tgz
+*.zip
 .comfy-control-downloads/
+
+# Large model weights (do not commit models to Git)
+*.safetensors
+*.ckpt
+*.pt
+*.bin
+*.onnx
+*.pkl
+models/
+ComfyUI/
+.cache/
+
+# Serverless outputs & local test storage
+serverless/output/
+serverless/runpod-volume/
+output/
+
+# IDE & AI agent configs
+.agents/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

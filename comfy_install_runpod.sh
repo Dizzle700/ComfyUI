@@ -188,13 +188,6 @@ fi
     "transformers[sentencepiece]>=4.46.2,<5.0.0" \
     "huggingface-hub[hf_xet]>=0.34.0,<1.0.0"
 
-# Копирование pisa_sr.pkl, если он лежит в папке со скриптом
-if [[ -f "$SCRIPT_DIR/pisa_sr.pkl" ]]; then
-    info "Обнаружен локальный файл pisa_sr.pkl. Копируем в ComfyUI..."
-    mkdir -p "$COMFY_DIR/models/loras"
-    cp "$SCRIPT_DIR/pisa_sr.pkl" "$COMFY_DIR/models/loras/pisa_sr.pkl"
-fi
-
 # Пакеты передаются из runpod_startup.sh через --models ИМЯ. Они выбираются
 # по заголовкам #ИМЯ внутри KRea.txt.
 # Здесь каталог ComfyUI и его models/ уже существуют, поэтому загрузчик может

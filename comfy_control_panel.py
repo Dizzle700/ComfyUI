@@ -680,32 +680,22 @@ def install_sparkvsr():
         loras_dir = os.path.join(COMFY_DIR, "models", "loras")
         os.makedirs(loras_dir, exist_ok=True)
         
-        # Сначала проверяем, есть ли pisa_sr.pkl в папке со скриптом
-        local_pisa = os.path.join(BASE_DIR, "pisa_sr.pkl")
-        if os.path.exists(local_pisa):
-            add_node_log("Обнаружен локальный файл pisa_sr.pkl. Копируем в ComfyUI...")
+        hf_token, _ = load_tokens()
+        if hf_token:
+            add_node_log("Попытка скачать pisa_sr.pkl с Hugging Face...")
             try:
-                shutil.copy(local_pisa, os.path.join(loras_dir, "pisa_sr.pkl"))
-                add_node_log("pisa_sr.pkl успешно скопирован!")
+                env = os.environ.copy()
+                env["HF_TOKEN"] = hf_token
+                subprocess.run(
+                    ["huggingface-cli", "download", "jiangyzy/PiSA-SR", "pisa_sr.pkl", "--local-dir", loras_dir],
+                    env=env, check=True
+                )
+                add_node_log("pisa_sr.pkl успешно скачан!")
             except Exception as e:
-                add_node_log(f"⚠️ Ошибка копирования pisa_sr.pkl: {str(e)}")
+                add_node_log(f"⚠️ Не удалось скачать pisa_sr.pkl автоматически: {str(e)}")
+                add_node_log(f"Скачайте его вручную и положите в {loras_dir}/pisa_sr.pkl")
         else:
-            hf_token, _ = load_tokens()
-            if hf_token:
-                add_node_log("Попытка скачать pisa_sr.pkl с Hugging Face...")
-                try:
-                    env = os.environ.copy()
-                    env["HF_TOKEN"] = hf_token
-                    subprocess.run(
-                        ["huggingface-cli", "download", "jiangyzy/PiSA-SR", "pisa_sr.pkl", "--local-dir", loras_dir],
-                        env=env, check=True
-                    )
-                    add_node_log("pisa_sr.pkl успешно скачан!")
-                except Exception as e:
-                    add_node_log(f"⚠️ Не удалось скачать pisa_sr.pkl автоматически: {str(e)}")
-                    add_node_log(f"Скачайте его вручную и положите в {loras_dir}/pisa_sr.pkl")
-            else:
-                add_node_log(f"Локальный pisa_sr.pkl не найден. Для автоматического скачивания настройте Hugging Face Token во вкладке '📥 Загрузчик моделей', либо скачайте его вручную и положите в {loras_dir}/pisa_sr.pkl")
+            add_node_log(f"Для автоматического скачивания pisa_sr.pkl настройте Hugging Face Token во вкладке '📥 Загрузчик моделей', либо скачайте его вручную и положите в {loras_dir}/pisa_sr.pkl")
             
         add_node_log("=== УСТАНОВКА SparkVSR ЗАВЕРШЕНА! ===")
         add_node_log("Перезапустите ComfyUI через вкладку Управление. Авто-загрузка workflow работает только после restart и на пустом canvas.")
