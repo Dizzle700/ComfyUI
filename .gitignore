@@ -40,6 +40,8 @@ ComfyUI/
 
 # Serverless outputs & local test storage
 serverless/output/
+serverless_gui/output/
+serverless_gui/
 serverless/runpod-volume/
 output/
 

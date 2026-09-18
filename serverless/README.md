@@ -69,9 +69,7 @@ serverless/
    ```bash
    bash serverless/prepare_network_volume.sh
    ```
-   *Если вы хотите передать токен Hugging Face:*
-   ```bash
-   bash serverless/prepare_network_volume.sh --hf-token "hf_xxx"
+   *Скрипт автоматически подтянет `HF_TOKEN` из `.env.secrets` и задействует ускоренный транспорт `hf-xet` (если запущен в образе PyTorch/ComfyUI на RunPod). Также токен можно передать вручную через `--hf-token "hf_xxx"`.*
    ```
 3. Скрипт создаст правильную структуру и скачает файлы:
    ```
