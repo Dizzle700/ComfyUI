@@ -12,7 +12,7 @@
         "class_type": "CLIPLoader",
         "inputs": {
           "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
-          "type": "krea2"
+          "type": "qwen_image"
         }
       },
       "3": {

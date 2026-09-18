@@ -139,11 +139,13 @@ mkdir -p "$TARGET_DIR"
 
 MODELS_DIR="$TARGET_DIR/models"
 DIFFUSION_DIR="$MODELS_DIR/diffusion_models"
+UNET_DIR="$MODELS_DIR/unet"
 TEXT_ENC_DIR="$MODELS_DIR/text_encoders"
+CLIP_DIR="$MODELS_DIR/clip"
 VAE_DIR="$MODELS_DIR/vae"
 LORAS_DIR="$MODELS_DIR/loras"
 
-mkdir -p "$DIFFUSION_DIR" "$TEXT_ENC_DIR" "$VAE_DIR" "$LORAS_DIR"
+mkdir -p "$DIFFUSION_DIR" "$UNET_DIR" "$TEXT_ENC_DIR" "$CLIP_DIR" "$VAE_DIR" "$LORAS_DIR"
 
 # Проверка и вывод статуса токена HF
 if [[ -n "$HF_TOKEN" ]]; then
@@ -338,8 +340,17 @@ if [[ "$DOWNLOAD_ERNIE" == true ]]; then
         "ernie-image-prompt-enhancer.safetensors"
 fi
 
+# Создание симлинков для полной совместимости с runpod/worker-comfyui (unet и clip)
+info "Создание симлинков (unet <-> diffusion_models, clip <-> text_encoders)..."
+for f in "$DIFFUSION_DIR"/*; do
+    [[ -f "$f" ]] && ln -sf "$f" "$UNET_DIR/$(basename "$f")" 2>/dev/null || true
+done
+for f in "$TEXT_ENC_DIR"/*; do
+    [[ -f "$f" ]] && ln -sf "$f" "$CLIP_DIR/$(basename "$f")" 2>/dev/null || true
+done
+
 echo "================================================================="
 success "Подготовка Network Volume завершена!"
 info "Итоговая структура файлов:"
-ls -lh "$DIFFUSION_DIR" "$TEXT_ENC_DIR" "$VAE_DIR" "$LORAS_DIR" 2>/dev/null || true
+ls -lh "$DIFFUSION_DIR" "$UNET_DIR" "$TEXT_ENC_DIR" "$CLIP_DIR" "$VAE_DIR" "$LORAS_DIR" 2>/dev/null || true
 echo "================================================================="

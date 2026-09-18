@@ -180,15 +180,14 @@ curl -X POST "https://api.runpod.ai/v2/ВАШ_ENDPOINT_ID/runsync" \
 
 ## ❓ Частые вопросы и диагностика (Troubleshooting)
 
-### 1. Ошибка `CLIPLoader: Value not in list`
-Для текстового энкодера `qwen3vl_4b_fp8_scaled.safetensors` в ноде `CLIPLoader` параметр `type` **обязательно** должен быть равен `"krea2"`. Если используется старая версия ComfyUI, обновите ComfyUI.
+### 1. Ошибка `CLIPLoader: Value not in list (type: 'krea2' not in [...])`
+Для текстового энкодера `qwen3vl_4b_fp8_scaled.safetensors` в ноде `CLIPLoader` параметр `type` в ComfyUI должен быть равен `"qwen_image"` (в текущих версиях ComfyUI тип Qwen3-VL зарегистрирован именно как `qwen_image`).
 
-### 2. Ошибка `Model not found`
-Убедитесь, что модели на Network Volume расположены именно в подпапках:
-- `models/diffusion_models/` (для диффузионной модели Krea-2, **не** в checkpoints!);
-- `models/text_encoders/` (для Qwen3-VL);
-- `models/vae/` (для VAE);
-- `models/loras/` (для LoRA).
+### 2. Ошибка `Value not in list: unet_name/clip_name not in []`
+Если в ошибке список файлов пустой (`[]`), это означает, что ComfyUI на сервере не видит файлы на Network Volume:
+- Проверьте, что в настройках Endpoint на RunPod выбран ваш **Network Volume**;
+- Проверьте, что вы скачали модели скриптом `prepare_network_volume.sh`;
+- Официальный образ RunPod `runpod/worker-comfyui` сканирует папки `models/unet/` и `models/clip/`, тогда как ComfyUI также использует `models/diffusion_models/` и `models/text_encoders/`. Скрипт `prepare_network_volume.sh` автоматически создает симлинки между ними, чтобы модели виделись при любой конфигурации.
 
 ### 3. Холодный старт (Cold Start) занимает много времени
 - Убедитесь, что для Endpoint включен **FlashBoot**.

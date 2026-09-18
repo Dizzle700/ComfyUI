@@ -13,10 +13,10 @@
     "class_type": "CLIPLoader",
     "inputs": {
       "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
-      "type": "krea2"
+      "type": "qwen_image"
     },
     "_meta": {
-      "title": "Load Qwen3-VL Text Encoder (type: krea2)"
+      "title": "Load Qwen3-VL Text Encoder (type: qwen_image)"
     }
   },
   "3": {
